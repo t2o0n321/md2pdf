@@ -38,6 +38,23 @@
   #content { max-width: 860px; margin: 0 auto; padding: 8px 4px 40px; }
   @media print {
     #content { max-width: none; }
+
+    /* Keep a diagram inside a single page.
+       break-inside:avoid cannot help once an element is taller than the page
+       -- the browser has no choice but to slice it, and a node gets cut in
+       half across the break. Bounding the height lets the rule work.
+       In print 1vh is 1% of the page box, so vh alone follows every paper
+       size, orientation and margin with no lookup table. The fixed 140px is
+       what vh cannot know about: the chrome between the page box and the
+       diagram (#content padding 48px + .mermaid margins 32px) plus headroom.
+       It has to be subtracted rather than folded into a percentage, because
+       those are absolute lengths -- 80px is 1.8% of A0 but 30% of A6
+       landscape, whose content box is only ~268px tall. Measured across all
+       11 formats in both orientations: -80px still splits on every short
+       page, -120px fits everywhere, -140px is that with room to spare.
+       width:auto lets the SVG keep its aspect ratio while height is bounded.
+       Only oversized diagrams are affected; anything shorter is untouched. */
+    .mermaid svg { max-height: calc(100vh - 140px); width: auto; }
   }
   h1 { font-size: 23px; color: var(--head); border-bottom: 3px solid var(--head);
        padding-bottom: 10px; margin: 6px 0 18px; line-height: 1.35; }

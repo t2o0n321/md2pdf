@@ -258,6 +258,26 @@ test("--scale and --font-size reject out-of-range values", () => {
   }
 });
 
+test("a diagram taller than the page is scaled to fit instead of being sliced", () => {
+  // break-inside:avoid cannot save an element taller than the page -- the
+  // browser has to split it, and a node gets cut in half across the break.
+  // The fixture is a single tall flowchart and nothing else, so "one page"
+  // is exactly the assertion that it was not split.
+  //
+  // A6 landscape is the worst case in the whole format matrix: its content
+  // box is only ~268px tall, which is where a percentage-only height limit
+  // stops working.
+  for (const args of [[], ["--format", "A6", "--landscape"]]) {
+    const out = path.join(OUT, `tall-${args.length ? "a6l" : "a4"}.pdf`);
+    const r = md2pdf(path.join(FIXTURES, "tall-diagram.md"), ...args, "-o", out);
+    assert(r.code === 0, `expected success for ${args.join(" ") || "A4"}, got exit ${r.code}`);
+    assert(
+      pageCount(out) === 1,
+      `tall diagram was split across ${pageCount(out)} pages at ${args.join(" ") || "A4"}`
+    );
+  }
+});
+
 test("doctor reports the environment", () => {
   const r = md2pdf("doctor");
   assert(r.code === 0, `expected success, got exit ${r.code}`);

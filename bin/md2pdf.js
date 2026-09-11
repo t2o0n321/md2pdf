@@ -34,6 +34,29 @@ const PAPER_FORMATS = [
   "Letter", "Legal", "Tabloid", "Ledger",
 ];
 
+/**
+ * Chrome refuses a render scale outside 0.1-2.0, and rejects it only once the
+ * page is already rendered. Validating up front turns that into an immediate,
+ * readable error.
+ */
+function normaliseScale(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0.1 || n > 2) {
+    throw new Error(`Invalid --scale "${value}". Must be a number between 0.1 and 2.`);
+  }
+  return n;
+}
+
+function normaliseFontSize(value) {
+  const s = String(value).trim();
+  if (!/^[\d.]+(px|pt|em|rem)?$/.test(s) || parseFloat(s) <= 0) {
+    throw new Error(
+      `Invalid --font-size "${value}". Use a positive number, optionally with a unit (e.g. 14, 14px, 11pt).`
+    );
+  }
+  return s;
+}
+
 function normaliseFormat(value) {
   const match = PAPER_FORMATS.find(
     (f) => f.toLowerCase() === String(value).trim().toLowerCase()
@@ -59,6 +82,13 @@ Options:
   --format <size>       Paper size (case-insensitive). Default: A4
                         A0 A1 A2 A3 A4 A5 A6 Letter Legal Tabloid Ledger
   --landscape           Landscape orientation (default: portrait)
+  --scale <n>           Zoom the whole page: text, diagrams and margins.
+                        0.1 to 2.0. Default: 1
+  --font <family>       Font for body text. Comma-separated families are
+                        allowed; the bundled fallbacks (including CJK) are
+                        kept behind whatever you name.
+  --mono-font <family>  Font for inline code and code blocks
+  --font-size <size>    Base text size. Bare numbers are px. Default: 12.5px
   --page-numbers        Print "n / total" in the footer
   --inline-math         Enable $...$ inline math. UNSAFE for documents containing
                         currency like "$5" -- off by default for that reason.
@@ -190,6 +220,7 @@ function parseArgs(argv) {
   const opts = {
     input: null, output: null, format: "A4", landscape: false, pageNumbers: false,
     inlineMath: false, title: null, keepHtml: null, cdn: false, verify: true,
+    font: null, monoFont: null, fontSize: null, scale: 1,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -202,6 +233,10 @@ function parseArgs(argv) {
       case "-o": case "--output": opts.output = next(); break;
       case "--format": opts.format = normaliseFormat(next()); break;
       case "--title": opts.title = next(); break;
+      case "--font": opts.font = next(); break;
+      case "--mono-font": opts.monoFont = next(); break;
+      case "--font-size": opts.fontSize = normaliseFontSize(next()); break;
+      case "--scale": opts.scale = normaliseScale(next()); break;
       case "--landscape": opts.landscape = true; break;
       case "--page-numbers": opts.pageNumbers = true; break;
       case "--inline-math": opts.inlineMath = true; break;
@@ -248,12 +283,14 @@ async function cmdConvert(argv) {
     // Chrome to prefer it), so the orientation has to be expressed here too --
     // passing landscape only to Chrome would be silently ignored.
     pageSize: opts.landscape ? `${opts.format} landscape` : opts.format,
+    font: opts.font, monoFont: opts.monoFont, fontSize: opts.fontSize,
     cdn: opts.cdn,
   });
 
   const result = await renderPdf({
     html: htmlPath, output, format: opts.format, landscape: opts.landscape,
-    pageNumbers: opts.pageNumbers, expects: built.expects, strict: opts.verify,
+    scale: opts.scale, pageNumbers: opts.pageNumbers,
+    expects: built.expects, strict: opts.verify,
   });
 
   const s = result.stats;

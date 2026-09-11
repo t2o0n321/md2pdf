@@ -70,6 +70,11 @@ function pageSize(file) {
   return { width: +m[3] - +m[1], height: +m[4] - +m[2] };
 }
 
+function pageCount(file) {
+  const bytes = fs.readFileSync(file).toString("latin1");
+  return (bytes.match(/\/Type\s*\/Page[^s]/g) || []).length;
+}
+
 function sizeOf(file) {
   return fs.existsSync(file) ? fs.statSync(file).size : 0;
 }
@@ -180,6 +185,77 @@ test("PATH probing never resolves a bare command to an extensionless file on Win
     posix.length === 1 && posix[0] === "npm",
     `expected ["npm"] on linux, got ${posix.join(", ")}`
   );
+});
+
+test("font family quoting follows CSS rules", () => {
+  const { fontPrefix, cssLength } = require("../lib/buildHtml");
+
+  const eq = (actual, expected, what) =>
+    assert(actual === expected, `${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+
+  eq(fontPrefix("Times New Roman"), '"Times New Roman", ', "a name with spaces must be quoted");
+  eq(fontPrefix("Georgia"), "Georgia, ", "a bare identifier needs no quotes");
+
+  // Quoting a generic family turns it into a request for a font literally
+  // named "serif", which does not exist -- the fallback silently stops working.
+  eq(fontPrefix("serif"), "serif, ", "generic families must stay unquoted");
+  eq(fontPrefix("monospace"), "monospace, ", "generic families must stay unquoted");
+
+  eq(fontPrefix("Noto Serif CJK TC, serif"), '"Noto Serif CJK TC", serif, ', "comma-separated list");
+  eq(fontPrefix(null), "", "no value yields no prefix");
+
+  eq(cssLength(14, "12.5px"), "14px", "a bare number is px");
+  eq(cssLength("11pt", "12.5px"), "11pt", "an explicit unit is kept");
+  eq(cssLength(null, "12.5px"), "12.5px", "falls back to the default");
+});
+
+test("--font, --mono-font and --font-size reach the page, keeping the fallbacks", () => {
+  const html = path.join(OUT, "fonts.html");
+  const r = md2pdf(
+    path.join(FIXTURES, "sample.md"),
+    "--font", "Times New Roman",
+    "--mono-font", "Courier New",
+    "--font-size", "18",
+    "--keep-html", html,
+    "-o", path.join(OUT, "fonts.pdf")
+  );
+  assert(r.code === 0, `expected success, got exit ${r.code}`);
+
+  const css = fs.readFileSync(html, "utf8");
+  assert(/font-size:\s*18px/.test(css), "--font-size did not reach the stylesheet");
+  assert(/"Courier New",\s*ui-monospace/.test(css), "--mono-font did not reach the stylesheet");
+
+  // Prepended, not substituted: a face that cannot draw CJK must still fall
+  // through to the bundled CJK stack rather than rendering empty boxes.
+  assert(
+    /"Times New Roman",\s*"PingFang TC"/.test(css),
+    "--font replaced the fallback chain instead of prepending to it"
+  );
+  assert(!/__[A-Z_]+__/.test(css), "an unsubstituted placeholder was left in the output");
+});
+
+test("--scale changes how much content fits on a page", () => {
+  const small = path.join(OUT, "scale-small.pdf");
+  const large = path.join(OUT, "scale-large.pdf");
+  const a = md2pdf(path.join(FIXTURES, "sample.md"), "--scale", "0.5", "-o", small);
+  const b = md2pdf(path.join(FIXTURES, "sample.md"), "--scale", "2", "-o", large);
+  assert(a.code === 0 && b.code === 0, "expected both renders to succeed");
+  assert(
+    pageCount(large) > pageCount(small),
+    `expected scale 2 to need more pages than scale 0.5, got ${pageCount(large)} vs ${pageCount(small)}`
+  );
+});
+
+test("--scale and --font-size reject out-of-range values", () => {
+  const cases = [["--scale", "5"], ["--scale", "abc"], ["--font-size", "0"], ["--font-size", "-3"]];
+  for (const args of cases) {
+    const r = md2pdf(path.join(FIXTURES, "sample.md"), ...args, "-o", path.join(OUT, "rejected.pdf"));
+    assert(r.code !== 0, `expected "${args.join(" ")}" to be rejected`);
+    assert(
+      /Invalid --/.test(r.output),
+      `expected a validation message for "${args.join(" ")}", got: ${r.output.trim()}`
+    );
+  }
 });
 
 test("doctor reports the environment", () => {

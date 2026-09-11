@@ -22,13 +22,13 @@
        Windows (Microsoft JhengHei/YaHei) and Linux (Noto/Source Han/WenQuanYi).
        A Linux box with no CJK font installed renders Chinese as tofu boxes --
        see README "Linux 字型". */
-    font-family: "PingFang TC","PingFang SC","Heiti TC",
+    font-family: __FONT_PREPEND__"PingFang TC","PingFang SC","Heiti TC",
                  "Microsoft JhengHei","Microsoft YaHei",
                  "Noto Sans CJK TC","Noto Sans CJK SC","Noto Sans TC",
                  "Source Han Sans TC","Source Han Sans SC","WenQuanYi Micro Hei",
                  -apple-system, "Segoe UI", "Helvetica Neue", Arial,
                  "Liberation Sans", "DejaVu Sans", sans-serif;
-    color: var(--ink); font-size: 12.5px; line-height: 1.75; margin: 0;
+    color: var(--ink); font-size: __FONT_SIZE__; line-height: 1.75; margin: 0;
   }
   /* On screen (--keep-html preview) a fixed column keeps lines readable.
      In print the page box already defines the measure, so the clamp must be
@@ -49,7 +49,7 @@
   p { margin: 8px 0; }
   a { color: #0b6; word-break: break-all; }
   strong { color: #111; }
-  code { font-family: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code",
+  code { font-family: __MONO_PREPEND__ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code",
                       Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace;
          background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 0.88em;
          color: #b03052; word-break: break-word; }

@@ -158,6 +158,30 @@ test("a missing input file fails cleanly", () => {
   assert(r.code !== 0, "expected a non-zero exit for a missing input");
 });
 
+test("PATH probing never resolves a bare command to an extensionless file on Windows", () => {
+  const { executableCandidates } = require("../lib/commandRunner");
+
+  // npm ships `npm` (a shell script) next to `npm.cmd`. Probing the bare name
+  // finds the script, which CreateProcess cannot launch -> spawn ENOENT.
+  const npm = executableCandidates("npm", "win32", ".COM;.EXE;.CMD;.BAT");
+  assert(!npm.includes("npm"), `bare "npm" must not be probed on Windows, got ${npm.join(", ")}`);
+  assert(npm.includes("npm.CMD"), `expected npm.CMD among candidates, got ${npm.join(", ")}`);
+
+  // An explicit extension is used verbatim, never suffixed again.
+  const chrome = executableCandidates("chrome.exe", "win32", ".COM;.EXE;.CMD;.BAT");
+  assert(
+    chrome.length === 1 && chrome[0] === "chrome.exe",
+    `expected ["chrome.exe"], got ${chrome.join(", ")}`
+  );
+
+  // POSIX probes the name as given.
+  const posix = executableCandidates("npm", "linux");
+  assert(
+    posix.length === 1 && posix[0] === "npm",
+    `expected ["npm"] on linux, got ${posix.join(", ")}`
+  );
+});
+
 test("doctor reports the environment", () => {
   const r = md2pdf("doctor");
   assert(r.code === 0, `expected success, got exit ${r.code}`);

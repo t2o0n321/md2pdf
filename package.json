@@ -1,0 +1,23 @@
+{
+  "name": "md2pdf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Render any Markdown file (mermaid diagrams + LaTeX) to PDF using a real Chrome.",
+  "license": "MIT",
+  "author": "t2o0n321",
+  "bin": {
+    "md2pdf": "bin/md2pdf.js"
+  },
+  "main": "lib/buildHtml.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "puppeteer-core": "23.11.1"
+  },
+  "scripts": {
+    "setup": "node bin/md2pdf.js setup",
+    "doctor": "node bin/md2pdf.js doctor",
+    "test": "node test/run.js"
+  }
+}

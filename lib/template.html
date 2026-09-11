@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<script>
+  window.MathJax = {
+    tex: { inlineMath: __INLINE_MATH__, displayMath: [['$$','$$']] },
+    svg: { fontCache: 'global' }
+  };
+</script>
+<script src="__VENDOR_MARKED__"></script>
+<script src="__VENDOR_MERMAID__"></script>
+<script src="__VENDOR_MATHJAX__" id="MathJax-script"></script>
+<style>
+  :root { --ink:#1a1a1a; --muted:#555; --line:#d8dce0; --accent:#0b6; --head:#0a3d62; --band:#f2f5f8; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    /* One stack covering all three platforms: macOS (PingFang/Heiti),
+       Windows (Microsoft JhengHei/YaHei) and Linux (Noto/Source Han/WenQuanYi).
+       A Linux box with no CJK font installed renders Chinese as tofu boxes --
+       see README "Linux 字型". */
+    font-family: "PingFang TC","PingFang SC","Heiti TC",
+                 "Microsoft JhengHei","Microsoft YaHei",
+                 "Noto Sans CJK TC","Noto Sans CJK SC","Noto Sans TC",
+                 "Source Han Sans TC","Source Han Sans SC","WenQuanYi Micro Hei",
+                 -apple-system, "Segoe UI", "Helvetica Neue", Arial,
+                 "Liberation Sans", "DejaVu Sans", sans-serif;
+    color: var(--ink); font-size: 12.5px; line-height: 1.75; margin: 0;
+  }
+  #content { max-width: 860px; margin: 0 auto; padding: 8px 4px 40px; }
+  h1 { font-size: 23px; color: var(--head); border-bottom: 3px solid var(--head);
+       padding-bottom: 10px; margin: 6px 0 18px; line-height: 1.35; }
+  h2 { font-size: 17.5px; color: var(--head); margin: 30px 0 12px; padding: 6px 10px;
+       background: var(--band); border-left: 5px solid var(--head); border-radius: 3px;
+       break-after: avoid; }
+  h3 { font-size: 14.5px; color: #16406b; margin: 20px 0 8px; break-after: avoid; }
+  h4 { font-size: 13px; color: #16406b; margin: 16px 0 6px; break-after: avoid; }
+  p { margin: 8px 0; }
+  a { color: #0b6; word-break: break-all; }
+  strong { color: #111; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code",
+                      Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace;
+         background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 0.88em;
+         color: #b03052; word-break: break-word; }
+  pre { background: #f6f8fa; border: 1px solid var(--line); border-radius: 6px;
+        padding: 10px 12px; overflow-x: auto; break-inside: avoid; }
+  pre code { background: none; color: #24292f; padding: 0; font-size: 11px; line-height: 1.6; }
+  blockquote { margin: 12px 0; padding: 8px 14px; background: #f7faf8;
+               border-left: 4px solid var(--accent); color: #33475b; border-radius: 3px;
+               break-inside: avoid; }
+  blockquote p { margin: 4px 0; }
+  ul, ol { margin: 8px 0; padding-left: 26px; }
+  li { margin: 4px 0; }
+  li input[type=checkbox] { margin-right: 7px; transform: scale(1.15); }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 11.8px;
+          break-inside: avoid; }
+  th, td { border: 1px solid var(--line); padding: 7px 9px; text-align: left;
+           vertical-align: top; }
+  th { background: var(--head); color: #fff; font-weight: 600; }
+  tbody tr:nth-child(even) { background: #f6f8fa; }
+  img { max-width: 100%; height: auto; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 24px 0; }
+  .mermaid { text-align: center; margin: 16px 0; break-inside: avoid; }
+  .mermaid svg { max-width: 100%; height: auto; }
+  mjx-container[display="true"] { margin: 14px 0 !important; overflow-x: auto; }
+  @page { size: __PAGE_SIZE__; margin: __PAGE_MARGIN__; }
+</style>
+</head>
+<body>
+<div id="content"></div>
+<script type="text/markdown" id="src">__MD__</script>
+<script>
+  window.addEventListener('load', async function () {
+    var stats = { mermaidTotal: 0, mermaidOk: 0, mermaidFailed: 0, math: 0, tables: 0, headings: 0 };
+    try {
+      var src = document.getElementById('src').textContent;
+      marked.setOptions({ gfm: true, breaks: false });
+      document.getElementById('content').innerHTML = marked.parse(src);
+
+      // ```mermaid fences -> mermaid divs
+      document.querySelectorAll('pre > code.language-mermaid').forEach(function (code) {
+        var div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = code.textContent;
+        code.parentElement.replaceWith(div);
+      });
+      stats.mermaidTotal = document.querySelectorAll('.mermaid').length;
+
+      if (stats.mermaidTotal > 0) {
+        mermaid.initialize({
+          startOnLoad: false, theme: 'default', securityLevel: 'loose',
+          flowchart: { htmlLabels: true, useMaxWidth: true }
+        });
+        // suppressErrors so one malformed diagram does not abort the whole
+        // document -- without it a single typo loses every other diagram too.
+        await mermaid.run({ querySelector: '.mermaid', suppressErrors: true });
+
+        // Counting <svg> elements is NOT enough: when suppressErrors is on,
+        // a diagram that failed to parse still leaves an svg behind -- the
+        // "Syntax error" placeholder mermaid draws in its place. That svg makes
+        // a broken document look fully rendered. Mermaid marks those with
+        // aria-roledescription="error", which is what actually distinguishes
+        // a drawn diagram from a drawn apology.
+        document.querySelectorAll('.mermaid').forEach(function (el) {
+          var svg = el.querySelector('svg');
+          if (!svg) { stats.mermaidFailed++; return; }
+          if ((svg.getAttribute('aria-roledescription') || '') === 'error') {
+            stats.mermaidFailed++;
+          } else {
+            stats.mermaidOk++;
+          }
+        });
+      }
+
+      // MathJax v3 boots asynchronously: at window.load the global is still the
+      // config object and typesetPromise does not exist yet. Skipping on that
+      // basis silently drops every formula, and whether it happens depends on
+      // how long mermaid took just above -- a race that looks fine until a
+      // document with small diagrams renders its maths as literal "$$...$$".
+      if (window.MathJax) {
+        if (MathJax.startup && MathJax.startup.promise) await MathJax.startup.promise;
+        if (MathJax.typesetPromise) await MathJax.typesetPromise();
+      }
+      stats.math = document.querySelectorAll('mjx-container').length;
+      stats.tables = document.querySelectorAll('table').length;
+      stats.headings = document.querySelectorAll('h1,h2,h3').length;
+
+      // Missing CJK fonts are the one failure that leaves a structurally
+      // perfect document completely unreadable: every diagram, formula and
+      // table renders, the page reports success, and every Chinese character
+      // prints as an empty box. A bare Linux container is exactly this case.
+      // Nothing else measured here would notice, so measure it directly:
+      // a glyph the font cannot draw falls back to .notdef and ends up the
+      // same width as a private-use codepoint, which never has a glyph.
+      // Escapes, not literal characters: this file travels between macOS, Linux
+      // and Windows editors, and a mangled encoding here would silently
+      // disable the very check that catches unreadable output.
+      var CJK = /[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/;
+      var cjk = (src.match(CJK) || [])[0];
+      stats.cjkNeeded = !!cjk;
+      if (cjk) {
+        // Compare RENDERED PIXELS, not advance widths. Measured on macOS: a
+        // real CJK glyph and the never-mapped private-use codepoint \uE000
+        // BOTH measure exactly 72px at 72px -- a missing glyph is drawn as a
+        // full-width box, so width tells the two apart not at all. Rasterising
+        // does: if the character paints the same pixels as a codepoint no font
+        // can map, the same .notdef box was used for both.
+        var ink = function (ch) {
+          var c = document.createElement('canvas');
+          c.width = 96; c.height = 96;
+          var x = c.getContext('2d', { willReadFrequently: true });
+          x.font = '72px ' + getComputedStyle(document.body).fontFamily;
+          x.textBaseline = 'top';
+          x.fillStyle = '#000';
+          x.fillText(ch, 4, 4);
+          var d = x.getImageData(0, 0, 96, 96).data, n = 0, h = 0;
+          for (var i = 3; i < d.length; i += 4) {
+            if (d[i] > 16) { n++; h = (h * 31 + i) >>> 0; }
+          }
+          return n + ':' + h;
+        };
+        stats.cjkOk = ink(cjk) !== ink('\uE000');
+      } else {
+        stats.cjkOk = true;
+      }
+
+      document.body.dataset.stats = JSON.stringify(stats);
+      document.body.setAttribute('data-render-done', '1');
+    } catch (e) {
+      document.body.dataset.stats = JSON.stringify(stats);
+      document.body.setAttribute('data-render-error', String(e && e.message || e));
+      document.body.setAttribute('data-render-done', '1');
+    }
+  });
+</script>
+</body>
+</html>

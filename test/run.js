@@ -79,6 +79,22 @@ function sizeOf(file) {
   return fs.existsSync(file) ? fs.statSync(file).size : 0;
 }
 
+/**
+ * Renders a built HTML file and returns the DOM as the page leaves it.
+ *
+ * Anything the page builds at runtime -- callouts, wikilinks, highlights --
+ * is absent from the file --keep-html writes, and asserting against that file
+ * silently passes: strings like `data-callout="note"` live in the template's
+ * own CSS and JS whether or not the transform ever ran.
+ */
+function renderedDom(htmlPath) {
+  const r = spawnSync(process.execPath, [path.join(__dirname, "dom.js"), htmlPath], {
+    encoding: "utf8",
+  });
+  assert(r.status === 0, `dom.js failed: ${(r.stderr || "").trim()}`);
+  return r.stdout;
+}
+
 console.log(`md2pdf test suite  (${process.platform}, node ${process.versions.node})\n`);
 
 test("renders a document with diagrams, formulas, tables and CJK", () => {
@@ -276,6 +292,84 @@ test("a diagram taller than the page is scaled to fit instead of being sliced", 
       `tall diagram was split across ${pageCount(out)} pages at ${args.join(" ") || "A4"}`
     );
   }
+});
+
+test("Obsidian embeds, callouts, wikilinks and highlights are rendered", () => {
+  const html = path.join(OUT, "obsidian.html");
+  const r = md2pdf(
+    path.join(FIXTURES, "obsidian", "note.md"),
+    "--keep-html", html,
+    "-o", path.join(OUT, "obsidian.pdf")
+  );
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+
+  // Embeds are resolved in node, so they are already in the built file.
+  const built = fs.readFileSync(html, "utf8");
+  // ![[sample.png]] resolved from the sibling images/ folder to an absolute
+  // file: URL -- a relative one would break, the HTML lives in a temp dir.
+  assert(/<img[^>]+src="file:\/\/[^"]*sample\.png"/.test(built), "embed was not resolved to a file: URL");
+  // ![[sample.png|120]] -- Obsidian's width suffix.
+  assert(/<img[^>]+width="120"/.test(built), "the |120 size suffix was not applied");
+  // Both images must actually decode, not merely be referenced.
+  assert(/2\/2 images/.test(r.output), `expected 2/2 images, got: ${r.output.trim()}`);
+
+  // Everything below is built by the page at runtime, so it has to be read
+  // back from the rendered DOM.
+  const dom = renderedDom(html);
+
+  assert(/data-callout="note"/.test(dom), "[!NOTE] did not become a callout");
+  assert(/data-callout="warning"/.test(dom), "lower-case [!warning] did not become a callout");
+  assert(/data-callout="tip"/.test(dom), "[!TIP]- did not become a callout");
+  assert(/>Custom title</.test(dom), "a callout's custom title was not used");
+  assert(!/\[!NOTE\]/.test(dom), "the literal [!NOTE] marker was left in the output");
+
+  assert(/class="wikilink">Linked Note</.test(dom), "[[wikilink]] was not rendered");
+  assert(/class="wikilink">alias for it</.test(dom), "[[target|alias]] did not use the alias");
+  assert(/<mark>highlighted text<\/mark>/.test(dom), "==highlight== was not rendered");
+});
+
+test("Obsidian markup inside code blocks is left alone", () => {
+  // The whole point: these notes are full of shell snippets. Rewriting the
+  // markdown with a regex would turn `==` or `[[` inside a code sample into
+  // markup and silently corrupt the command being documented.
+  const html = path.join(OUT, "obsidian-code.html");
+  const r = md2pdf(
+    path.join(FIXTURES, "obsidian", "note.md"),
+    "--keep-html", html,
+    "-o", path.join(OUT, "obsidian-code.pdf")
+  );
+  assert(r.code === 0, `expected success, got exit ${r.code}`);
+
+  // Read the rendered DOM, not the built file: the built file still carries
+  // the raw markdown in a <script> block, so every literal below would be
+  // trivially "present" there and the assertions would prove nothing.
+  const dom = renderedDom(html);
+
+  for (const literal of [
+    "![[should-stay-literal.png]]",
+    "[[not-a-wikilink]]",
+    "==not-a-highlight==",
+    "![[also-literal.png]]",
+    "[[also-not-a-link]]",
+    "==also-plain==",
+  ]) {
+    assert(dom.includes(literal), `code content was rewritten: ${literal} is missing`);
+  }
+  assert(!/src="[^"]*should-stay-literal/.test(dom), "an embed inside a fence became an image");
+  assert(!/wikilink">not-a-wikilink/.test(dom), "a wikilink inside code was linkified");
+  assert(!/<mark>not-a-highlight/.test(dom), "a highlight inside code was marked up");
+});
+
+test("an embed that cannot be found is reported, not silently blank", () => {
+  const r = md2pdf(
+    path.join(FIXTURES, "obsidian", "missing-embed.md"),
+    "-o", path.join(OUT, "missing-embed.pdf")
+  );
+  assert(r.code !== 0, "expected a non-zero exit when an embedded file is missing");
+  assert(
+    /could not be found/.test(r.output) && /definitely-not-here/.test(r.output),
+    `expected the missing filename to be named, got: ${r.output.trim()}`
+  );
 });
 
 test("doctor reports the environment", () => {

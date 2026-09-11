@@ -290,7 +290,7 @@ async function cmdConvert(argv) {
   const result = await renderPdf({
     html: htmlPath, output, format: opts.format, landscape: opts.landscape,
     scale: opts.scale, pageNumbers: opts.pageNumbers,
-    expects: built.expects, strict: opts.verify,
+    expects: built.expects, embeds: built.embeds, strict: opts.verify,
   });
 
   const s = result.stats;
@@ -299,6 +299,7 @@ async function cmdConvert(argv) {
     `  ${(result.size / 1024).toFixed(0)} KB ${G.sep} ` +
       `${s.mermaidOk || 0}/${s.mermaidTotal || 0} diagrams ${G.sep} ` +
       `${s.math || 0} formulas ${G.sep} ${s.tables || 0} tables ${G.sep} ` +
+      (s.images ? `${s.images - (s.imagesFailed || 0)}/${s.images} images ${G.sep} ` : "") +
       `assets: ${built.offline ? "vendored" : "CDN"}`
   );
   if (result.problems.length) {

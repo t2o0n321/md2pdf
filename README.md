@@ -13,6 +13,7 @@
 - **渲染防呆驗證**：轉檔時自動檢查每張圖表與公式是否成功繪製；若渲染失敗會立即報錯中斷，避免產出殘缺文件。
 - **完全離線可用**：核心前端靜態資源已打包在專案內，首次 setup 後即可在無網路環境下運行。
 - **完善的 CJK 支援**：針對中文、日文、韓文字型與排版進行優化，避免缺字與排版異常。
+- **Obsidian 語法支援**：可直接轉換 Obsidian 筆記，支援 `![[圖片]]` 嵌入、`> [!NOTE]` 標註方塊、`[[雙向連結]]` 與 `==螢光標記==`。
 - **跨平台相容**：支援 macOS、Linux 與 Windows，自動偵測 Chrome、Chromium、Edge 或 Brave。
 
 ---
@@ -75,6 +76,9 @@ md2pdf slides.md --scale 1.2
 
 # 啟用行內公式（如：$E=mc^2$；注意：文件中若有金額 $ 請留意）
 md2pdf math.md --inline-math
+
+# 轉換 Obsidian 筆記（![[嵌入]]、[!NOTE] 標註等自動處理）
+md2pdf ~/vault/notes/會議記錄.md
 
 # 偵錯排版：保留產生的 HTML 檔案供瀏覽器檢視
 md2pdf draft.md --keep-html ./debug.html
@@ -150,6 +154,29 @@ docker run --rm -v "$PWD:/work" -w /work node:22-slim bash -c \
    node /path/to/md2pdf/bin/md2pdf.js /work/doc.md"
 ```
 
+### 五-4、Obsidian 語法支援
+
+可直接把 Obsidian 筆記轉成 PDF，無需事先改寫語法。
+
+| 語法 | 轉換結果 |
+| :--- | :--- |
+| `![[圖片.png]]` | 嵌入圖片 |
+| `![[圖片.png\|400]]` | 指定寬度（亦支援 `\|寬x高`） |
+| `> [!NOTE]` | 標註方塊（含顏色與標題） |
+| `> [!WARNING] 自訂標題` | 標註方塊，使用自訂標題 |
+| `> [!TIP]-` / `+` | 接受折疊標記並忽略（PDF 無法折疊） |
+| `[[筆記名稱]]` | 樣式化文字 |
+| `[[筆記名稱\|別名]]` | 顯示別名 |
+| `==螢光標記==` | 螢光底色 |
+
+標註類型支援 Obsidian 全套與 GitHub 五種（`note`、`tip`、`important`、`warning`、`caution`、`info`、`success`、`question`、`failure`、`danger`、`bug`、`example`、`quote` 及其常見別名），**不分大小寫**。
+
+**圖片的尋找順序**：先以字面路徑解析，接著依序尋找 `images/`、`attachments/`、`assets/`、`media/` 等慣例資料夾，最後以檔名在筆記所在目錄樹中搜尋（比照 Obsidian 以檔名跨 vault 解析的行為）。
+
+> [!NOTE]
+> 找不到的嵌入檔案會**直接報錯並列出檔名**，而非印出一塊空白。
+> 程式碼區塊與行內程式碼中的 `![[...]]`、`[[...]]`、`==...==` 一律**原樣保留**，不會被誤判成語法。
+
 ---
 
 ## 六、環境變數與 Exit Code
@@ -175,6 +202,8 @@ docker run --rm -v "$PWD:/work" -w /work node:22-slim bash -c \
 | 公式顯示為原始文字 `$$...$$` | LaTeX 語法錯誤導致 MathJax 無法解析，請使用 `--keep-html` 檢查錯誤。 |
 | 內文包含 `$` 導致排版混亂 | 若文中有標示價格，請移除 `--inline-math` 參數。 |
 | 想要自訂全域 CSS 樣式與版面邊距 | 可直接編輯 `lib/template.html` 中的 `<style>` 樣式區塊。 |
+| `embedded file(s) could not be found` | Obsidian 嵌入的圖片不在筆記目錄樹內；請確認附件資料夾與筆記在同一層或其子目錄下。 |
+| 圖片印出來是空白 | 檢查輸出摘要的 `N/M images`；數字不相等代表有圖片載入失敗。 |
 
 ---
 

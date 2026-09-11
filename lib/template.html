@@ -77,6 +77,31 @@
                border-left: 4px solid var(--accent); color: #33475b; border-radius: 3px;
                break-inside: avoid; }
   blockquote p { margin: 4px 0; }
+  /* Obsidian / GitHub callouts: > [!NOTE], > [!WARNING] ... */
+  .callout { --c: #4c7fd6; margin: 14px 0; padding: 10px 14px; border-radius: 4px;
+             border-left: 4px solid var(--c); background: color-mix(in srgb, var(--c) 7%, #fff);
+             break-inside: avoid; }
+  .callout-title { font-weight: 700; color: var(--c); margin-bottom: 4px;
+                   letter-spacing: .02em; }
+  .callout-body > :first-child { margin-top: 0; }
+  .callout-body > :last-child { margin-bottom: 0; }
+  .callout[data-callout="note"]      { --c: #4c7fd6; }
+  .callout[data-callout="tip"]       { --c: #16a34a; }
+  .callout[data-callout="important"] { --c: #8250df; }
+  .callout[data-callout="warning"]   { --c: #d97706; }
+  .callout[data-callout="caution"]   { --c: #dc2626; }
+  .callout[data-callout="info"]      { --c: #0891b2; }
+  .callout[data-callout="success"]   { --c: #16a34a; }
+  .callout[data-callout="question"]  { --c: #ca8a04; }
+  .callout[data-callout="failure"]   { --c: #dc2626; }
+  .callout[data-callout="danger"]    { --c: #b91c1c; }
+  .callout[data-callout="bug"]       { --c: #be123c; }
+  .callout[data-callout="example"]   { --c: #7c3aed; }
+  .callout[data-callout="quote"]     { --c: #6b7280; }
+  mark { background: #fff3a3; padding: 0 2px; border-radius: 2px; }
+  /* A wikilink has no target in a PDF, so it is shown as marked-up text
+     rather than a link that goes nowhere. */
+  .wikilink { color: #4c7fd6; border-bottom: 1px dotted currentColor; }
   ul, ol { margin: 8px 0; padding-left: 26px; }
   li { margin: 4px 0; }
   li input[type=checkbox] { margin-right: 7px; transform: scale(1.15); }
@@ -99,11 +124,107 @@
 <script type="text/markdown" id="src">__MD__</script>
 <script>
   window.addEventListener('load', async function () {
-    var stats = { mermaidTotal: 0, mermaidOk: 0, mermaidFailed: 0, math: 0, tables: 0, headings: 0 };
+    var stats = { mermaidTotal: 0, mermaidOk: 0, mermaidFailed: 0, math: 0,
+                  tables: 0, headings: 0, images: 0, imagesFailed: 0 };
     try {
       var src = document.getElementById('src').textContent;
       marked.setOptions({ gfm: true, breaks: false });
-      document.getElementById('content').innerHTML = marked.parse(src);
+      var content = document.getElementById('content');
+      content.innerHTML = marked.parse(src);
+
+      // ----- Obsidian / GitHub callouts: > [!NOTE], > [!WARNING] ... -------
+      // marked turns these into a plain blockquote whose first paragraph
+      // begins with the literal "[!NOTE]", so the marker is rewritten here
+      // into a titled box.
+      var CALLOUTS = {
+        note:'note', tip:'tip', hint:'tip', important:'important',
+        warning:'warning', attention:'warning', caution:'caution',
+        info:'info', todo:'info', abstract:'info', summary:'info', tldr:'info',
+        success:'success', check:'success', done:'success',
+        question:'question', help:'question', faq:'question',
+        failure:'failure', fail:'failure', missing:'failure',
+        danger:'danger', error:'danger', bug:'bug',
+        example:'example', quote:'quote', cite:'quote'
+      };
+      document.querySelectorAll('blockquote').forEach(function (bq) {
+        var p = bq.firstElementChild;
+        if (!p || p.tagName !== 'P') return;
+        var html = p.innerHTML;
+        var nl = html.indexOf('\n');
+        var head = (nl === -1 ? html : html.slice(0, nl)).trim();
+        // The trailing -/+ is Obsidian's fold marker; a PDF cannot fold, so
+        // it is accepted and dropped rather than left on screen.
+        var m = /^\[!([A-Za-z]+)\][-+]?\s*(.*)$/.exec(head);
+        if (!m) return;
+
+        var kind = CALLOUTS[m[1].toLowerCase()] || 'note';
+        var title = (m[2] || '').trim() ||
+          m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+        var rest = nl === -1 ? '' : html.slice(nl + 1);
+        p.innerHTML = rest;
+        if (!rest.trim()) p.remove();
+
+        var box = document.createElement('div');
+        box.className = 'callout';
+        box.setAttribute('data-callout', kind);
+        var titleEl = document.createElement('div');
+        titleEl.className = 'callout-title';
+        titleEl.textContent = title;
+        var body = document.createElement('div');
+        body.className = 'callout-body';
+        while (bq.firstChild) body.appendChild(bq.firstChild);
+        box.appendChild(titleEl);
+        box.appendChild(body);
+        bq.replaceWith(box);
+      });
+
+      // ----- [[wikilinks]] and ==highlights== -----------------------------
+      // Done over text nodes rather than by rewriting the markdown string:
+      // these notes are full of shell snippets, and a regex over the source
+      // would happily turn `==` or `[[` inside a code sample into markup.
+      // The walker refuses to descend into code, so that cannot happen.
+      // It runs BEFORE the mermaid fences are converted, while they are still
+      // <pre><code> and therefore also excluded.
+      var walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (node) {
+          for (var el = node.parentElement; el && el !== content; el = el.parentElement) {
+            var tag = el.tagName;
+            if (tag === 'CODE' || tag === 'PRE' || tag === 'A' ||
+                tag === 'SCRIPT' || tag === 'STYLE') return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      });
+      var textNodes = [];
+      for (var tn; (tn = walker.nextNode());) textNodes.push(tn);
+
+      var INLINE = /\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]|==([^=\n]+)==/g;
+      textNodes.forEach(function (node) {
+        var text = node.nodeValue;
+        if (text.indexOf('[[') === -1 && text.indexOf('==') === -1) return;
+        INLINE.lastIndex = 0;
+        var frag = document.createDocumentFragment();
+        var last = 0, m;
+        while ((m = INLINE.exec(text))) {
+          if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+          var el;
+          if (m[3] !== undefined) {
+            el = document.createElement('mark');
+            el.textContent = m[3];
+          } else {
+            // A wikilink has nowhere to point inside a PDF, so it becomes
+            // marked-up text instead of a link that goes nowhere.
+            el = document.createElement('span');
+            el.className = 'wikilink';
+            el.textContent = (m[2] || m[1]).trim();
+          }
+          frag.appendChild(el);
+          last = m.index + m[0].length;
+        }
+        if (!last) return;
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        node.parentNode.replaceChild(frag, node);
+      });
 
       // ```mermaid fences -> mermaid divs
       document.querySelectorAll('pre > code.language-mermaid').forEach(function (code) {
@@ -191,6 +312,22 @@
       } else {
         stats.cjkOk = true;
       }
+
+      // Settle images before declaring the page done. page.pdf() would
+      // otherwise be free to print while one is still decoding, and a picture
+      // that never loaded looks exactly like one that simply had not arrived
+      // yet -- so this also makes the failure count meaningful.
+      await Promise.all(Array.prototype.map.call(document.images, function (img) {
+        if (img.complete) return null;
+        return new Promise(function (done) {
+          img.addEventListener('load', done, { once: true });
+          img.addEventListener('error', done, { once: true });
+        });
+      }));
+      stats.images = document.images.length;
+      stats.imagesFailed = Array.prototype.filter.call(document.images, function (img) {
+        return !img.naturalWidth;
+      }).length;
 
       document.body.dataset.stats = JSON.stringify(stats);
       document.body.setAttribute('data-render-done', '1');

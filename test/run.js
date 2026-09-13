@@ -95,6 +95,87 @@ function renderedDom(htmlPath) {
   return r.stdout;
 }
 
+/**
+ * Opens a written .svg in a browser and reports what parsed.
+ *
+ * Asserting on the file's text would pass for a file that is malformed XML or
+ * draws nothing, which are exactly the two ways an exported diagram goes
+ * wrong without looking wrong.
+ */
+const svgCache = new Map();
+function inspectSvg(file) {
+  // Memoised: each call is a browser launch, and the same file is asserted
+  // against from several tests.
+  if (!svgCache.has(file)) {
+    const r = spawnSync(process.execPath, [path.join(__dirname, "svg.js"), file], {
+      encoding: "utf8",
+    });
+    assert(r.status === 0, `svg.js failed for ${file}: ${(r.stderr || "").trim()}`);
+    svgCache.set(file, JSON.parse(r.stdout));
+  }
+  return svgCache.get(file);
+}
+
+/**
+ * Reads a PNG's IHDR: dimensions and colour type, straight from the bytes.
+ *
+ * Colour type 6 is RGBA and 2 is RGB, which is how "--background transparent
+ * actually produced an alpha channel" is checked without an image library.
+ */
+function pngInfo(file) {
+  const b = fs.readFileSync(file);
+  assert(
+    b.length > 33 && b.readUInt32BE(0) === 0x89504e47,
+    `${file} is not a PNG (${b.length} bytes)`
+  );
+  return { width: b.readUInt32BE(16), height: b.readUInt32BE(20), colorType: b[25] };
+}
+
+/**
+ * The top-left pixel of a PNG, as {r,g,b,a}.
+ *
+ * Reading the colour TYPE is not enough to prove a background: Chrome is free
+ * to write an RGBA image whose alpha is 255 everywhere, so "has an alpha
+ * channel" and "is transparent" are different claims. This reads the pixel.
+ *
+ * Only the first pixel of the first scanline is decoded, which is why the
+ * filter byte can be ignored: with no pixel to the left and no row above, all
+ * five PNG filters reduce to the raw value there.
+ */
+function pngCornerPixel(file) {
+  const b = fs.readFileSync(file);
+  const chunks = [];
+  let depth, colorType, interlace;
+  for (let i = 8; i + 8 <= b.length; ) {
+    const len = b.readUInt32BE(i);
+    const type = b.toString("ascii", i + 4, i + 8);
+    if (type === "IHDR") {
+      depth = b[i + 16];
+      colorType = b[i + 17];
+      interlace = b[i + 20];
+    }
+    if (type === "IDAT") chunks.push(b.subarray(i + 8, i + 8 + len));
+    i += 12 + len;
+  }
+  assert(depth === 8, `${file}: expected 8-bit samples, got ${depth}`);
+  assert(interlace === 0, `${file}: expected a non-interlaced PNG`);
+  assert(colorType === 2 || colorType === 6, `${file}: unexpected colour type ${colorType}`);
+  const raw = require("zlib").inflateSync(Buffer.concat(chunks));
+  return {
+    r: raw[1],
+    g: raw[2],
+    b: raw[3],
+    a: colorType === 6 ? raw[4] : 255,
+  };
+}
+
+/** The image files one export run produced, in name order. */
+function exported(dir) {
+  return fs.existsSync(dir)
+    ? fs.readdirSync(dir).filter((f) => /\.(svg|png)$/.test(f)).sort()
+    : [];
+}
+
 console.log(`md2pdf test suite  (${process.platform}, node ${process.versions.node})\n`);
 
 test("renders a document with diagrams, formulas, tables and CJK", () => {
@@ -370,6 +451,683 @@ test("an embed that cannot be found is reported, not silently blank", () => {
     /could not be found/.test(r.output) && /definitely-not-here/.test(r.output),
     `expected the missing filename to be named, got: ${r.output.trim()}`
   );
+});
+
+// ---------------------------------------------------------------------------
+// md2pdf mermaid -- one image file per diagram, and nothing else
+// ---------------------------------------------------------------------------
+
+const DIAGRAMS = path.join(FIXTURES, "diagrams.md");
+const MIXED = path.join(FIXTURES, "mixed-diagrams.md");
+const NO_DIAGRAMS = path.join(FIXTURES, "obsidian", "note.md");
+const SVG_OUT = path.join(OUT, "mermaid-svg");
+
+test("exports one SVG per diagram and skips everything else", () => {
+  const r = md2pdf("mermaid", DIAGRAMS, "-o", SVG_OUT);
+  assert(
+    r.code === 0,
+    `expected success, got exit ${r.code}.\n        ${r.output.trim().split("\n").join("\n        ")}`
+  );
+  assert(
+    exported(SVG_OUT).join(",") === "diagrams-01.svg,diagrams-02.svg,diagrams-03.svg",
+    `expected three numbered SVGs, got: ${exported(SVG_OUT).join(", ") || "(nothing)"}`
+  );
+  // The fixture also holds prose, a table, a checklist and a $$formula$$. None
+  // of it is a diagram, so none of it may produce a file -- and no PDF either.
+  const everything = fs.readdirSync(SVG_OUT).sort();
+  assert(
+    everything.length === 3,
+    `only the diagrams should have been written, got: ${everything.join(", ")}`
+  );
+});
+
+test("extraction follows the markdown parser, not a regex over the source", () => {
+  const one = inspectSvg(path.join(SVG_OUT, "diagrams-01.svg"));
+  const two = inspectSvg(path.join(SVG_OUT, "diagrams-02.svg"));
+  const three = inspectSvg(path.join(SVG_OUT, "diagrams-03.svg"));
+
+  // A ~~~tilde fence and a fence indented inside a list item are both
+  // invisible to /^```mermaid$/m, and both must still be exported, in
+  // document order. Counting three files is not enough on its own: two
+  // opposite mistakes would still total three.
+  assert(
+    /使用者/.test(two.labels),
+    `the tilde-fenced sequence diagram was not exported (got: ${two.labels.slice(0, 80)})`
+  );
+  assert(
+    /Working/.test(three.labels),
+    `the list-indented state diagram was not exported (got: ${three.labels.slice(0, 80)})`
+  );
+  // ...and a mermaid fence QUOTED inside a wider fence is documentation about
+  // mermaid, not a diagram. A regex counts it; a parser does not.
+  for (const [name, svg] of [["01", one], ["02", two], ["03", three]]) {
+    assert(
+      !/ThisMustNotBeExported/.test(svg.labels),
+      `diagrams-${name}.svg exported a fence that was quoted inside a wider fence`
+    );
+  }
+});
+
+test("each exported SVG is a valid standalone file that actually draws", () => {
+  const file = path.join(SVG_OUT, "diagrams-01.svg");
+  const text = fs.readFileSync(file, "utf8");
+  assert(text.startsWith("<?xml "), "the file has no XML declaration");
+  assert(!/__[A-Z_]+__/.test(text), "an unsubstituted placeholder was left in the output");
+
+  const svg = inspectSvg(file);
+  assert(!svg.parserError, `the SVG is not well-formed XML: ${svg.parserError}`);
+  assert(svg.rootTag === "svg", `expected an <svg> root element, got <${svg.rootTag}>`);
+
+  // mermaid's default is width="100%", which resolves against nothing in a
+  // standalone file: the diagram opens at whatever size the viewer guesses.
+  assert(/^[\d.]+$/.test(svg.width || ""), `width must be an explicit length, got "${svg.width}"`);
+  assert(/^[\d.]+$/.test(svg.height || ""), `height must be an explicit length, got "${svg.height}"`);
+  assert(svg.viewBox, "the SVG has no viewBox, so it cannot be scaled");
+  assert(
+    svg.bbox && svg.bbox.width > 10 && svg.bbox.height > 10,
+    `the SVG parses but draws nothing: bbox ${JSON.stringify(svg.bbox)}`
+  );
+
+  // Labels have to be <text>, not <foreignObject>: foreignObject renders in a
+  // browser and disappears in Illustrator, Inkscape, Figma and librsvg, which
+  // is a blank diagram that looks fine everywhere it was tested.
+  assert(svg.texts > 0, "the diagram has no <text> elements");
+  assert(svg.foreignObjects === 0, `expected no <foreignObject>, found ${svg.foreignObjects}`);
+  assert(
+    /開始/.test(svg.labels),
+    `CJK labels did not survive into the SVG: ${svg.labels.slice(0, 120)}`
+  );
+});
+
+test("--scale resizes the SVG without moving the drawing", () => {
+  const dir = path.join(OUT, "mermaid-scale");
+  const r = md2pdf("mermaid", DIAGRAMS, "--scale", "2", "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}`);
+
+  const plain = inspectSvg(path.join(SVG_OUT, "diagrams-01.svg"));
+  const scaled = inspectSvg(path.join(dir, "diagrams-01.svg"));
+  const near = (a, b) => Math.abs(a - b) < 0.5;
+  assert(
+    near(parseFloat(scaled.width), parseFloat(plain.width) * 2),
+    `expected width ${parseFloat(plain.width) * 2}, got ${scaled.width}`
+  );
+  assert(
+    near(parseFloat(scaled.height), parseFloat(plain.height) * 2),
+    `expected height ${parseFloat(plain.height) * 2}, got ${scaled.height}`
+  );
+  // Scaling by rewriting the viewBox would change WHAT is on the canvas rather
+  // than how large the canvas is, and would crop or inset the diagram.
+  assert(
+    scaled.viewBox === plain.viewBox,
+    `--scale rewrote the viewBox: "${plain.viewBox}" -> "${scaled.viewBox}"`
+  );
+});
+
+test("--type png multiplies the pixel dimensions by --scale", () => {
+  const one = path.join(OUT, "mermaid-png1");
+  const three = path.join(OUT, "mermaid-png3");
+  const a = md2pdf("mermaid", DIAGRAMS, "--type", "png", "--scale", "1", "-o", one);
+  const b = md2pdf("mermaid", DIAGRAMS, "--type", "png", "--scale", "3", "-o", three);
+  assert(a.code === 0 && b.code === 0, `expected both exports to succeed (${a.code}, ${b.code})`);
+  assert(
+    exported(one).join(",") === "diagrams-01.png,diagrams-02.png,diagrams-03.png",
+    `expected three PNGs, got: ${exported(one).join(", ")}`
+  );
+
+  const small = pngInfo(path.join(one, "diagrams-01.png"));
+  const big = pngInfo(path.join(three, "diagrams-01.png"));
+  assert(
+    big.width === small.width * 3 && big.height === small.height * 3,
+    `expected 3x the pixels, got ${big.width}x${big.height} from ${small.width}x${small.height}`
+  );
+
+  // The capture has to cover the WHOLE diagram, not a viewport-sized window of
+  // it: the element is routinely taller than the viewport, and a clip that
+  // tracked the viewport instead would silently cut the bottom off. Checked
+  // against the diagram's own viewBox, so it is an absolute claim rather than
+  // the two PNGs merely agreeing with each other. One pixel of slack, because
+  // mermaid emits fractional sizes and the device-pixel clip is rounded.
+  const svg = inspectSvg(path.join(SVG_OUT, "diagrams-01.svg"));
+  const [, , vbW, vbH] = svg.viewBox.trim().split(/[\s,]+/).map(Number);
+  assert(
+    Math.abs(small.width - vbW) <= 1 && Math.abs(small.height - vbH) <= 1,
+    `the PNG should cover the whole diagram: got ${small.width}x${small.height} for a ${vbW}x${vbH} viewBox`
+  );
+  assert(
+    Math.abs(big.width - vbW * 3) <= 1 && Math.abs(big.height - vbH * 3) <= 1,
+    `the 3x PNG should cover the whole diagram: got ${big.width}x${big.height} for a ${vbW}x${vbH} viewBox`
+  );
+});
+
+test("PNG defaults to a high-resolution render, not a 1x one", () => {
+  // A diagram captured at 1x is only as wide as its CSS layout, which is soft
+  // on a retina display and rough in print. The source is vector, so a 3x
+  // capture is a genuine re-render rather than an upscale -- the only cost is
+  // file size, and a blurry default would be the worse trade.
+  const dir = path.join(OUT, "mermaid-png-default");
+  const r = md2pdf("mermaid", DIAGRAMS, "--type", "png", "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+
+  const base = pngInfo(path.join(OUT, "mermaid-png1", "diagrams-01.png"));
+  const dflt = pngInfo(path.join(dir, "diagrams-01.png"));
+  assert(
+    dflt.width === base.width * 3 && dflt.height === base.height * 3,
+    `expected the default PNG to be 3x, got ${dflt.width}x${dflt.height} against ${base.width}x${base.height} at --scale 1`
+  );
+  assert(/scale 3x/.test(r.output), `the scale used should be reported, got: ${r.output.trim()}`);
+
+  // SVG has no such dial -- it is vector, and its scale only sets the size the
+  // file asks to be drawn at -- so its default stays life-size: the declared
+  // width equals the viewBox width.
+  const svg = inspectSvg(path.join(SVG_OUT, "diagrams-01.svg"));
+  const viewBoxWidth = parseFloat(svg.viewBox.trim().split(/[\s,]+/)[2]);
+  assert(
+    Math.abs(parseFloat(svg.width) - viewBoxWidth) < 0.5,
+    `the default SVG should be life-size: width ${svg.width} against viewBox width ${viewBoxWidth}`
+  );
+});
+
+test("--background transparent is genuinely transparent, and the default is not", () => {
+  const dir = path.join(OUT, "mermaid-transparent");
+  const html = path.join(OUT, "mermaid-kept.html");
+  const r = md2pdf(
+    "mermaid", DIAGRAMS, "--type", "png", "--background", "transparent",
+    "--keep-html", html, "-o", dir
+  );
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+  assert(sizeOf(html) > 0, "--keep-html did not keep the intermediate HTML");
+
+  // The headless default page colour is #121212, not white, so a PNG that
+  // relied on the page background rather than painting its own would come out
+  // near-black -- which is why the background lives inside the SVG.
+  const clear = pngCornerPixel(path.join(dir, "diagrams-01.png"));
+  assert(clear.a === 0, `expected a transparent corner, got alpha ${clear.a}`);
+
+  const opaque = pngCornerPixel(path.join(OUT, "mermaid-png1", "diagrams-01.png"));
+  assert(
+    opaque.a === 255 && opaque.r === 255 && opaque.g === 255 && opaque.b === 255,
+    `expected an opaque white corner by default, got ${JSON.stringify(opaque)}`
+  );
+});
+
+test("a malformed diagram is refused, and --no-verify exports the rest", () => {
+  const strict = path.join(OUT, "mermaid-mixed-strict");
+  const a = md2pdf("mermaid", MIXED, "-o", strict);
+  assert(a.code !== 0, "expected a non-zero exit for an unparseable diagram");
+  assert(
+    /could not be rendered/.test(a.output),
+    `expected the failure to be named, got: ${a.output.trim()}`
+  );
+  // Nothing is written when verification fails. A directory that is half this
+  // document and half the previous one is worse than no directory at all.
+  assert(
+    exported(strict).length === 0,
+    `a failed run must write nothing, got: ${exported(strict).join(", ")}`
+  );
+
+  const forced = path.join(OUT, "mermaid-mixed-forced");
+  const b = md2pdf("mermaid", MIXED, "--no-verify", "-o", forced);
+  assert(b.code === 0, `expected success with --no-verify, got exit ${b.code}`);
+  // The number is the diagram's position in the DOCUMENT, not a running count
+  // of what rendered. The fixture puts the BROKEN diagram first precisely so
+  // this can fail: the survivor is the document's second diagram, so it must
+  // come out as -02, leaving the gap that tells a reader which one is missing.
+  // Renumbering it to -01 would silently relabel every later diagram too.
+  assert(
+    exported(forced).join(",") === "mixed-diagrams-02.svg",
+    `the survivor must keep its document position, got: ${exported(forced).join(", ") || "(nothing)"}`
+  );
+  assert(/failed to render/.test(b.output), "the skipped diagram was not reported");
+});
+
+test("a document with no diagrams is an error, unless --no-verify", () => {
+  const dir = path.join(OUT, "mermaid-none");
+  const a = md2pdf("mermaid", NO_DIAGRAMS, "-o", dir);
+  assert(a.code !== 0, "expected a non-zero exit when there is nothing to export");
+  assert(
+    /no mermaid diagrams/.test(a.output),
+    `expected an explanation, got: ${a.output.trim()}`
+  );
+
+  const b = md2pdf("mermaid", NO_DIAGRAMS, "--no-verify", "-o", dir);
+  assert(b.code === 0, `expected --no-verify to exit quietly, got exit ${b.code}`);
+  assert(exported(dir).length === 0, "nothing should have been written");
+});
+
+test("mermaid options are validated, including the --format A4 slip", () => {
+  const out = ["-o", path.join(OUT, "mermaid-rejected")];
+
+  // --format is a PAPER SIZE on the PDF path. Typing it here is the obvious
+  // slip, and "Unknown image type A4" would not explain why it is wrong.
+  const paper = md2pdf("mermaid", DIAGRAMS, "--format", "A4", ...out);
+  assert(paper.code !== 0, "expected a paper size to be rejected");
+  assert(
+    /paper size/.test(paper.output) && /--type/.test(paper.output),
+    `expected the slip to be explained, got: ${paper.output.trim()}`
+  );
+
+  const type = md2pdf("mermaid", DIAGRAMS, "--type", "gif", ...out);
+  assert(
+    type.code !== 0 && /Valid types:/.test(type.output),
+    `expected the valid types to be listed, got: ${type.output.trim()}`
+  );
+
+  const theme = md2pdf("mermaid", DIAGRAMS, "--theme", "nope", ...out);
+  assert(
+    theme.code !== 0 && /Valid themes:/.test(theme.output),
+    `expected the valid themes to be listed, got: ${theme.output.trim()}`
+  );
+
+  // The PDF path caps --scale at 2 because Chrome's print API does. An image
+  // has no such ceiling, so 3 must be accepted here -- and it is, above.
+  for (const bad of ["0", "11", "abc"]) {
+    const r = md2pdf("mermaid", DIAGRAMS, "--scale", bad, ...out);
+    assert(r.code !== 0, `expected --scale ${bad} to be rejected`);
+    assert(/Invalid --scale/.test(r.output), `expected a validation message for --scale ${bad}`);
+  }
+
+  const colour = md2pdf("mermaid", DIAGRAMS, "--background", "not-a-colour", ...out);
+  assert(
+    colour.code !== 0 && /background/.test(colour.output),
+    `expected an unrecognised colour to be rejected, got: ${colour.output.trim()}`
+  );
+
+  const file = path.join(OUT, "not-a-directory.txt");
+  fs.writeFileSync(file, "x");
+  const notDir = md2pdf("mermaid", DIAGRAMS, "-o", file);
+  assert(
+    notDir.code !== 0 && /must be a directory/.test(notDir.output),
+    `expected --out to refuse a file, got: ${notDir.output.trim()}`
+  );
+});
+
+test("--prefix names the files, and leftovers from an earlier run are reported", () => {
+  const dir = path.join(OUT, "mermaid-prefix");
+  const r = md2pdf("mermaid", DIAGRAMS, "--prefix", "arch", "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}`);
+  assert(
+    exported(dir).join(",") === "arch-01.svg,arch-02.svg,arch-03.svg",
+    `expected the prefix to be used, got: ${exported(dir).join(", ")}`
+  );
+
+  // A document that loses a diagram leaves the old file behind. Deleting it
+  // would be overstepping -- it is the user's file -- but saying nothing is
+  // how a deleted diagram lives on in whatever imports the folder.
+  fs.writeFileSync(path.join(dir, "arch-09.svg"), "<svg/>");
+  const again = md2pdf("mermaid", DIAGRAMS, "--prefix", "arch", "-o", dir);
+  assert(again.code === 0, `expected success, got exit ${again.code}`);
+  assert(
+    /earlier run/.test(again.output) && /arch-09\.svg/.test(again.output),
+    `expected the stale file to be named, got: ${again.output.trim()}`
+  );
+});
+
+test("two runs of the same document produce byte-identical files", () => {
+  // mermaid ids its SVGs from a global counter unless told otherwise, and that
+  // id is woven through the internal stylesheet ~50 times. Left alone, every
+  // run rewrites every byte, and committing an exported diagram to git shows a
+  // whole-file diff each time nothing changed.
+  const dir = path.join(OUT, "mermaid-repeat");
+  const r = md2pdf("mermaid", DIAGRAMS, "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}`);
+  for (const name of ["diagrams-01.svg", "diagrams-02.svg", "diagrams-03.svg"]) {
+    assert(
+      fs.readFileSync(path.join(SVG_OUT, name)).equals(fs.readFileSync(path.join(dir, name))),
+      `${name} differs between two runs of the same input`
+    );
+  }
+});
+
+test("labels containing < & > survive, and a raw div.mermaid is exported too", () => {
+  const dir = path.join(OUT, "mermaid-parity");
+  const source = path.join(FIXTURES, "diagram-parity.md");
+  const r = md2pdf("mermaid", source, "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+
+  // The PDF path renders every .mermaid element, not only fenced blocks. If
+  // the two commands disagree about what a document contains, one of them is
+  // lying to the user -- so this asserts they agree, rather than asserting a
+  // number the export path picked for itself.
+  const pdf = md2pdf(source, "-o", path.join(OUT, "parity.pdf"));
+  assert(pdf.code === 0, `the PDF path failed on the same fixture: ${pdf.output.trim()}`);
+  const claimed = /(\d+)\/(\d+) diagrams/.exec(pdf.output);
+  assert(claimed, `could not read the PDF diagram count from: ${pdf.output.trim()}`);
+  assert(
+    exported(dir).length === Number(claimed[2]),
+    `the PDF renders ${claimed[2]} diagrams but the export wrote ${exported(dir).length}`
+  );
+
+  // mermaid escapes a label for HTML and then inserts it as SVG text, so
+  // "5 < 6" reaches the file as the literal characters "5 &lt; 6" and the
+  // reader sees the entity. The PDF path does not have this, because
+  // htmlLabels:true decodes it again on the way in.
+  const labels = inspectSvg(path.join(dir, "diagram-parity-01.svg")).labels;
+  assert(
+    /5 < 6 && 7 > 2/.test(labels),
+    `entities were left double-escaped in the label: ${labels}`
+  );
+  assert(!/&lt;|&amp;|&gt;/.test(labels), `an entity is still visible in the label: ${labels}`);
+  // ...and exactly one layer. Decoding twice would turn the source's literal
+  // "AT&amp;T" into something else again; mermaid's own semantics display it
+  // as "AT&T", and the PDF path agrees, so the image has to as well.
+  assert(/AT&T/.test(labels), `"AT&amp;T" should display as "AT&T", got: ${labels}`);
+
+  // The opposite mistake, and the more damaging one. sequenceDiagram writes
+  // its label into the SVG verbatim, so "undoing the escape" there is a
+  // second, unwanted decode -- and because the decoder resolves the legacy
+  // semicolon-less references, a URL's &reg= and &copy= parameters turn into
+  // (R)= and (C)=. Wrong text, silently, in a picture nobody re-reads.
+  const url = inspectSvg(path.join(dir, "diagram-parity-02.svg")).labels;
+  assert(
+    /id=5&reg=US&copy=1/.test(url),
+    `a URL in a verbatim diagram type was mangled by entity decoding: ${url}`
+  );
+
+  const raw = inspectSvg(path.join(dir, "diagram-parity-03.svg")).labels;
+  assert(/RawDiv/.test(raw), `the raw <div class="mermaid"> was not exported: ${raw}`);
+});
+
+test("a document containing a literal </script> still exports", () => {
+  // The PDF path embeds the markdown raw into a script block and therefore has
+  // to REJECT any document containing a closing script tag. Inheriting that
+  // here would mean a document losing its diagrams because its prose happens
+  // to discuss HTML, which is why the markdown is base64-encoded into the page
+  // instead. Without the encoding the block closes early, the page script
+  // never runs, and the export hangs until it times out.
+  const dir = path.join(OUT, "mermaid-script-tag");
+  const source = path.join(FIXTURES, "script-tag.md");
+  const r = md2pdf("mermaid", source, "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+  assert(
+    exported(dir).join(",") === "script-tag-01.svg",
+    `expected the one diagram, got: ${exported(dir).join(", ") || "(nothing)"}`
+  );
+  // The html fence is a code block, not a diagram, so it must not be exported.
+  const labels = inspectSvg(path.join(dir, "script-tag-01.svg")).labels;
+  assert(/Parse/.test(labels) && /Render/.test(labels), `wrong diagram exported: ${labels}`);
+
+  // And the PDF path still refuses the same file -- the two commands differ
+  // here on purpose, so if that ever changes this test should be revisited.
+  const pdf = md2pdf(source, "-o", path.join(OUT, "script-tag.pdf"));
+  assert(pdf.code !== 0, "the PDF path is expected to still reject a literal </script>");
+});
+
+test("--theme, --font and --html-labels each reach the diagram", () => {
+  // Each of these could silently become a no-op without any other test
+  // noticing: the export still succeeds and still writes a valid SVG.
+  const base = path.join(OUT, "mermaid-opts-base");
+  const themed = path.join(OUT, "mermaid-opts-theme");
+  const fonted = path.join(OUT, "mermaid-opts-font");
+  const htmlLabels = path.join(OUT, "mermaid-opts-htmllabels");
+  const src = path.join(FIXTURES, "diagrams.md");
+
+  assert(md2pdf("mermaid", src, "-o", base).code === 0, "the plain export failed");
+  assert(
+    md2pdf("mermaid", src, "--theme", "dark", "-o", themed).code === 0,
+    "--theme dark failed"
+  );
+  assert(
+    md2pdf("mermaid", src, "--font", "Courier New", "-o", fonted).code === 0,
+    "--font failed"
+  );
+  assert(
+    md2pdf("mermaid", src, "--html-labels", "-o", htmlLabels).code === 0,
+    "--html-labels failed"
+  );
+
+  const read = (dir) => fs.readFileSync(path.join(dir, "diagrams-01.svg"), "utf8");
+  const plain = read(base);
+
+  // A theme is a different palette baked into the SVG's own stylesheet.
+  assert(read(themed) !== plain, "--theme produced a byte-identical file");
+
+  // --font must reach the stylesheet AND keep the CJK fallbacks behind it,
+  // or Chinese labels in a diagram become empty boxes.
+  const withFont = read(fonted);
+  assert(/"Courier New"/.test(withFont), "--font did not reach the diagram's stylesheet");
+  assert(
+    /"Courier New",\s*"PingFang TC"/.test(withFont),
+    "--font replaced the CJK fallback chain instead of prepending to it"
+  );
+
+  // --html-labels swaps <text> for <foreignObject>: richer labels, but the
+  // text vanishes outside a browser, which is why it is opt-in.
+  const rich = inspectSvg(path.join(htmlLabels, "diagrams-01.svg"));
+  const flat = inspectSvg(path.join(base, "diagrams-01.svg"));
+  assert(
+    rich.foreignObjects > 0 && rich.texts === 0,
+    `--html-labels should draw labels as foreignObject, got ${rich.foreignObjects} fo / ${rich.texts} text`
+  );
+  assert(
+    flat.foreignObjects === 0 && flat.texts > 0,
+    `the default should draw labels as <text>, got ${flat.foreignObjects} fo / ${flat.texts} text`
+  );
+});
+
+test("stale-file reporting is scoped to the same format", () => {
+  // Exporting the PNGs of a document into the directory that already holds its
+  // SVGs is an ordinary thing to do. Reporting those SVGs as leftovers every
+  // time is how a user learns to ignore the one warning that matters.
+  const { staleFiles } = require("../lib/exportMermaid");
+  const dir = path.join(OUT, "stale-unit");
+  fs.mkdirSync(dir, { recursive: true });
+  for (const name of ["u-01.svg", "u-02.svg", "u-03.svg", "u-01.png", "u-09.png", "other-01.svg"]) {
+    fs.writeFileSync(path.join(dir, name), "x");
+  }
+
+  const svgRun = staleFiles(dir, "u", "svg", [path.join(dir, "u-01.svg")]);
+  assert(
+    svgRun.join(",") === "u-02.svg,u-03.svg",
+    `an svg run should report only unrewritten svgs, got: ${svgRun.join(",") || "(none)"}`
+  );
+
+  const pngRun = staleFiles(dir, "u", "png", [path.join(dir, "u-01.png")]);
+  assert(
+    pngRun.join(",") === "u-09.png",
+    `a png run must ignore the svgs entirely, got: ${pngRun.join(",") || "(none)"}`
+  );
+
+  // A different document's files are not this run's business either.
+  assert(
+    !svgRun.includes("other-01.svg") && !pngRun.includes("other-01.svg"),
+    "another prefix's files were reported as stale"
+  );
+});
+
+test("a fence that renders blank is refused rather than exported empty", () => {
+  // "flowchart TD" with no nodes renders happily as a 16x16 canvas, and
+  // mermaid.render() does not throw for it -- so try/catch alone would report
+  // success and hand the user an empty file for a typo.
+  const dir = path.join(OUT, "mermaid-empty");
+  const r = md2pdf("mermaid", path.join(FIXTURES, "empty-fence.md"), "-o", dir);
+  assert(r.code !== 0, "expected a non-zero exit for a diagram that rendered blank");
+  assert(
+    /rendered empty/.test(r.output),
+    `expected the blank diagram to be named, got: ${r.output.trim()}`
+  );
+  assert(exported(dir).length === 0, "an empty diagram must not be written");
+});
+
+test("the id inside each SVG is scoped to its own source", () => {
+  // Every rule in the stylesheet mermaid embeds is scoped as `#<id> .foo`, and
+  // that scoping is the only thing keeping two diagrams' themes apart. An id
+  // of just the position would make diagram 1 of every document "md2pdf-01",
+  // so inlining two documents' diagrams into one page cross-styles them.
+  const a = fs.readFileSync(path.join(SVG_OUT, "diagrams-01.svg"), "utf8");
+  const b = fs.readFileSync(path.join(OUT, "mermaid-parity", "diagram-parity-01.svg"), "utf8");
+  const idOf = (svg) => (/<svg[^>]*\bid="([^"]+)"/.exec(svg) || [])[1];
+
+  assert(
+    /^md2pdf-01-[0-9a-f]{8}$/.test(idOf(a)),
+    `expected a position-and-hash id, got "${idOf(a)}"`
+  );
+  assert(
+    idOf(a) !== idOf(b),
+    `two different documents produced the same SVG id "${idOf(a)}"`
+  );
+});
+
+test("diagram types that emit width=100% are given a real size", () => {
+  // quadrantChart and xychart-beta ignore useMaxWidth:false and ship
+  // width="100%" with a max-width style and no height. A standalone file like
+  // that has no intrinsic size: it reports 150x150 through an <img> tag, and
+  // as a PNG its resolution follows the ambient viewport rather than --scale.
+  // The size is therefore restated from the viewBox for EVERY diagram type,
+  // which is what this pins down.
+  const dir = path.join(OUT, "mermaid-sized");
+  const r = md2pdf("mermaid", path.join(FIXTURES, "sized-diagrams.md"), "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+
+  for (const name of ["sized-diagrams-01.svg", "sized-diagrams-02.svg"]) {
+    const text = fs.readFileSync(path.join(dir, name), "utf8");
+    assert(!/max-width/.test(text), `${name} still carries a max-width style`);
+    assert(!/width="100%"/.test(text), `${name} still declares width="100%"`);
+
+    const svg = inspectSvg(path.join(dir, name));
+    assert(
+      /^[\d.]+$/.test(svg.width || "") && /^[\d.]+$/.test(svg.height || ""),
+      `${name} has no explicit numeric size: width="${svg.width}" height="${svg.height}"`
+    );
+    // The declared size must match the viewBox, not some other number: that is
+    // what makes the file render at the size it claims.
+    const [, , vbW, vbH] = svg.viewBox.trim().split(/[\s,]+/).map(Number);
+    assert(
+      Math.abs(parseFloat(svg.width) - vbW) < 0.5 &&
+        Math.abs(parseFloat(svg.height) - vbH) < 0.5,
+      `${name} declares ${svg.width}x${svg.height} against viewBox ${vbW}x${vbH}`
+    );
+  }
+});
+
+test("the output does not depend on the input's filename", () => {
+  // mermaid feeds the render id straight into querySelector('#' + id), so an
+  // id derived from the filename throws from deep inside mermaid for exactly
+  // the names the OUTPUT files are allowed to have: a dot, a space or a
+  // bracket makes an invalid selector. The id is built from a fixed prefix
+  // instead, and only the FILENAME is sanitised.
+  const dir = path.join(OUT, "mermaid-awkward");
+  const awkward = path.join(OUT, "my.report (v2).md");
+  fs.copyFileSync(DIAGRAMS, awkward);
+
+  const r = md2pdf("mermaid", awkward, "-o", dir);
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+  assert(
+    exported(dir).length === 3,
+    `expected three diagrams, got: ${exported(dir).join(", ") || "(nothing)"}`
+  );
+  // The dot and the brackets are legal in a filename; the space is not worth
+  // keeping, and a leading dash would make the file look like a command line
+  // option to whatever is pointed at it next.
+  for (const name of exported(dir)) {
+    assert(!/\s/.test(name), `the exported filename kept a space: ${name}`);
+    assert(!name.startsWith("-"), `the exported filename starts with a dash: ${name}`);
+  }
+  // Same diagrams, different filename -> byte-identical files. The id depends
+  // on the diagram source, never on what the document is called.
+  const plain = fs.readFileSync(path.join(SVG_OUT, "diagrams-01.svg"));
+  const renamed = fs.readFileSync(path.join(dir, exported(dir)[0]));
+  assert(plain.equals(renamed), "renaming the input changed the exported bytes");
+});
+
+test("the CJK font check follows the diagrams, not the prose around them", () => {
+  // A missing CJK font is fatal here, because a PNG bakes the empty boxes into
+  // the pixels for good. That makes the SCOPE of the check load-bearing: this
+  // command draws nothing but the diagrams, so Chinese prose wrapped around a
+  // set of English flowcharts says nothing about whether the output is
+  // readable. Scoping it to the whole document would refuse those documents on
+  // any machine without a CJK font -- a bare container, most CI images -- for
+  // no reason at all.
+  //
+  // The flag is read from the page rather than inferred from the CLI's output,
+  // because on a machine that HAS the fonts both scopings succeed: this
+  // assertion would pass either way if it were made against the exit code.
+  const report = (fixture, name) => {
+    const html = path.join(OUT, name);
+    const r = md2pdf(
+      "mermaid", path.join(FIXTURES, fixture),
+      "--keep-html", html, "-o", path.join(OUT, `${name}-out`)
+    );
+    assert(r.code === 0, `expected ${fixture} to export, got exit ${r.code}: ${r.output.trim()}`);
+    const out = spawnSync(process.execPath, [path.join(__dirname, "harness.js"), html], {
+      encoding: "utf8",
+    });
+    assert(out.status === 0, `harness.js failed: ${(out.stderr || "").trim()}`);
+    return JSON.parse(out.stdout);
+  };
+
+  const prose = report("cjk-prose-only.md", "cjk-prose.html");
+  assert(prose.total === 1, `expected one diagram, got ${prose.total}`);
+  assert(
+    prose.cjkNeeded === false,
+    "CJK prose around an ASCII-only diagram must not arm the font check"
+  );
+
+  // ...and a diagram whose own labels are CJK must still arm it.
+  const labels = report("diagrams.md", "cjk-labels.html");
+  assert(
+    labels.cjkNeeded === true,
+    "a diagram with CJK labels must arm the font check"
+  );
+});
+
+test("CRLF and LF checkouts export identical diagrams", () => {
+  // git's autocrlf is on by default on Windows, so the .md a Windows user
+  // feeds this tool almost always has CRLF line endings while the same file on
+  // macOS and Linux has LF. Anything downstream that is sensitive to that --
+  // fence parsing, the diagram source that gets hashed into the SVG id, the
+  // base64 round-trip -- would fail on exactly one platform in CI and nowhere
+  // a developer could reproduce it.
+  //
+  // Both variants are written here rather than relying on the fixture's own
+  // endings, which are whatever git checked out.
+  const lfDir = path.join(OUT, "mermaid-lf");
+  const crlfDir = path.join(OUT, "mermaid-crlf");
+  const body = fs.readFileSync(DIAGRAMS, "utf8").replace(/\r\n/g, "\n");
+  const lfFile = path.join(OUT, "endings-lf.md");
+  const crlfFile = path.join(OUT, "endings-crlf.md");
+  fs.writeFileSync(lfFile, body, "utf8");
+  fs.writeFileSync(crlfFile, body.replace(/\n/g, "\r\n"), "utf8");
+
+  const a = md2pdf("mermaid", lfFile, "-o", lfDir);
+  const b = md2pdf("mermaid", crlfFile, "-o", crlfDir);
+  assert(a.code === 0 && b.code === 0, `expected both exports to succeed (${a.code}, ${b.code})`);
+  assert(
+    exported(lfDir).length === 3 && exported(crlfDir).length === 3,
+    `expected three diagrams from each, got ${exported(lfDir).length} and ${exported(crlfDir).length}`
+  );
+  for (let i = 1; i <= 3; i++) {
+    const n = String(i).padStart(2, "0");
+    assert(
+      fs
+        .readFileSync(path.join(lfDir, `endings-lf-${n}.svg`))
+        .equals(fs.readFileSync(path.join(crlfDir, `endings-crlf-${n}.svg`))),
+      `diagram ${n} differs between a CRLF and an LF checkout`
+    );
+  }
+});
+
+test("diagram filenames are padded, sortable and safe on every platform", () => {
+  const { diagramFileName, sanitisePrefix } = require("../lib/exportMermaid");
+  const eq = (actual, expected, what) =>
+    assert(
+      actual === expected,
+      `${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
+    );
+
+  eq(diagramFileName("report", 1, "svg"), "report-01.svg", "single digits are padded so files sort");
+  eq(diagramFileName("report", 12, "png"), "report-12.png", "two digits are unchanged");
+  // Padded to a FIXED width, never to the width of the total: padding to the
+  // total renames the first nine files the moment a tenth diagram is added,
+  // breaking every document that already links to them.
+  eq(diagramFileName("report", 100, "svg"), "report-100.svg", "past 99 the number just grows");
+
+  eq(sanitisePrefix('a:b*c?"d<e>f|g'), "a-b-c--d-e-f-g", "characters Windows forbids are replaced");
+  eq(sanitisePrefix("my report"), "my-report", "whitespace is replaced");
+  // A file called "-01.svg" reads as an option to every tool pointed at it.
+  eq(sanitisePrefix("-leading"), "leading", "a leading dash is dropped");
+  eq(sanitisePrefix("...."), "diagram", "a name with nothing usable falls back");
+  // CJK filenames are legal on all three platforms and must survive intact.
+  eq(sanitisePrefix("架構圖"), "架構圖", "non-ASCII names are left alone");
 });
 
 test("doctor reports the environment", () => {

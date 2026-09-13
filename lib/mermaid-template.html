@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>__TITLE__</title>
+<script src="__VENDOR_MARKED__"></script>
+<script src="__VENDOR_MERMAID__"></script>
+<style>
+  /* Deliberately almost empty.
+     Every rule here can leak into a diagram -- the SVG sits in this document
+     while it is measured and screenshotted -- so the page styles only the
+     scaffolding around it, never the SVG's insides.
+
+     html/body carry NO background on purpose: an explicit background defeats
+     puppeteer's omitBackground, so `--background transparent` would silently
+     produce an opaque PNG. Each diagram paints its own background instead,
+     via a rect inside the SVG, which is also what makes the PNG and the SVG
+     come out identical. */
+  body { margin: 0; padding: 16px; font: 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  figure.diagram { margin: 0 0 28px; }
+  /* An inline SVG sits on the text baseline, so its box picks up a few pixels
+     of descender space. Harmless on screen, but the element screenshot is
+     clipped to that box -- display:block is what keeps a stray transparent
+     strip out of every PNG. Set here rather than on the element so it is not
+     serialised into the exported .svg file. */
+  figure.diagram > svg { display: block; }
+  figcaption { margin-top: 6px; color: #777; font-size: 11px; }
+  figure.failed { padding: 10px 12px; border-left: 4px solid #dc2626; background: #fef2f2; }
+  figure.failed pre { margin: 4px 0 0; white-space: pre-wrap; font-size: 11px; color: #991b1b; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script type="application/json" id="cfg">__CONFIG__</script>
+<script type="text/plain" id="src">__MARKDOWN__</script>
+<script>
+  /**
+   * Renders every mermaid diagram in the document, one isolated SVG each.
+   *
+   * The markdown arrives base64-encoded. The PDF path embeds it raw and has to
+   * reject any document containing a literal "<\/script>" for that reason;
+   * here the document is only a source of diagrams, so refusing to export a
+   * perfectly good flowchart because the prose elsewhere discusses HTML would
+   * be a poor trade. Base64 removes the hazard instead of policing it.
+   */
+  function decodeMarkdown(b64) {
+    var bin = atob(b64.trim());
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  /**
+   * Gives the SVG an explicit, honest intrinsic size.
+   *
+   * Two problems to fix, both of which produce a file that is technically
+   * valid and practically useless:
+   *
+   *  - mermaid's useMaxWidth emits width="100%" plus style="max-width:500px".
+   *    In a standalone file "100%" resolves against nothing. Most diagram types
+   *    respect useMaxWidth:false, but quadrantChart and xychart-beta ignore it
+   *    (measured, mermaid 10.9.1), so the size is restated from the viewBox
+   *    here rather than trusted from config -- that covers every diagram type
+   *    including any added later.
+   *  - The viewBox origin is frequently NOT 0 0 (observed: "-8 -8 100 296",
+   *    and "0 5.86e-15 600 400"), so a background rect pinned to 0,0 would sit
+   *    slightly off the diagram and leave an unpainted sliver along two edges.
+   */
+  function normaliseSize(svg) {
+    var vb = (svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    var box;
+    if (vb.length === 4 && vb.every(function (n) { return isFinite(n); })) {
+      box = { x: vb[0], y: vb[1], width: vb[2], height: vb[3] };
+    } else {
+      // No usable viewBox: fall back to what the renderer laid out, and give
+      // the file a viewBox so it stays scalable.
+      var b = svg.getBBox();
+      box = { x: b.x, y: b.y, width: b.width, height: b.height };
+      svg.setAttribute('viewBox', box.x + ' ' + box.y + ' ' + box.width + ' ' + box.height);
+    }
+    // Only max-width is removed, not the whole style attribute: journey
+    // diagrams carry a preserveAspectRatio and others may add more later.
+    if (svg.style) {
+      svg.style.removeProperty('max-width');
+      if (!svg.getAttribute('style')) svg.removeAttribute('style');
+    }
+    svg.setAttribute('width', box.width);
+    svg.setAttribute('height', box.height);
+    return box;
+  }
+
+  /**
+   * Paints the background inside the SVG rather than behind it.
+   *
+   * Doing it here means the .svg file and the .png come out identical, and the
+   * PNG can be captured with omitBackground so that `transparent` is genuinely
+   * transparent instead of whatever the headless default happens to be
+   * (measured: #121212, not white).
+   *
+   * The fill goes through the CSSOM, not string concatenation, so a colour
+   * from the command line cannot inject anything; and an inline style beats
+   * mermaid's own stylesheet, which is scoped by id but does contain bare
+   * element selectors in some diagram types.
+   */
+  function paintBackground(svg, box, colour) {
+    var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', box.x);
+    rect.setAttribute('y', box.y);
+    rect.setAttribute('width', box.width);
+    rect.setAttribute('height', box.height);
+    rect.style.fill = colour;
+    svg.insertBefore(rect, svg.firstChild);
+  }
+
+  /** A colour the browser does not recognise silently becomes no colour. */
+  function isColour(value) {
+    var probe = document.createElement('span');
+    probe.style.color = '';
+    probe.style.color = value;
+    return probe.style.color !== '';
+  }
+
+  /**
+   * mermaid.render() leaves its temporary measuring container behind when the
+   * diagram fails to parse (confirmed in 10.9.1; a successful render cleans up
+   * after itself). Left alone they accumulate in the page, and they are what a
+   * later querySelector or screenshot can pick up by mistake.
+   */
+  function removeOrphans(id) {
+    ['d' + id, id].forEach(function (orphan) {
+      document.querySelectorAll('[id="' + orphan + '"]').forEach(function (el) {
+        if (!el.closest('#stage')) el.remove();
+      });
+    });
+  }
+
+  /**
+   * A stable short hash of the diagram source, folded into the SVG's id.
+   *
+   * The id is not decoration: every one of the ~50 rules in the stylesheet
+   * mermaid embeds in each SVG is scoped as `#<id> .foo`, which is the only
+   * thing keeping two diagrams' themes apart. An id of just the position means
+   * diagram 1 of report-a.md and diagram 1 of report-b.md are both
+   * "md2pdf-01", so inlining both into one page cross-styles them. Hashing the
+   * source keeps the id deterministic -- the same diagram always exports to
+   * the same bytes -- while making that collision effectively impossible.
+   */
+  function sourceHash(text) {
+    var h = 5381;
+    for (var i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+
+  /**
+   * Undoes ONE layer of entity escaping in the diagram's text labels.
+   *
+   * With htmlLabels:false, mermaid escapes a label for HTML and then inserts
+   * the result as an SVG text node, so it is escaped twice: the label
+   * `5 < 6 && 7 > 2` reaches the file as the literal characters
+   * `5 &lt; 6 &amp;&amp; 7 &gt; 2` and the reader sees the entities. (The PDF
+   * path does not have this: htmlLabels:true assigns the escaped string to
+   * innerHTML, which decodes it again.) Decoding one layer here is what makes
+   * the exported diagram say what the PDF says.
+   *
+   * A textarea is the decoder because its content is parsed as RCDATA:
+   * entities are resolved, and a literal "<" cannot become an element.
+   */
+  var decoder = document.createElement('textarea');
+  function decodeEntitiesOnce(text) {
+    if (text.indexOf('&') === -1) return text;
+    decoder.innerHTML = text;
+    return decoder.value;
+  }
+
+  /**
+   * The diagram types that escape their label text on the way into the SVG,
+   * and therefore need exactly one layer taken back off.
+   *
+   * This is an ALLOWLIST, and the default of "leave the text alone" is the
+   * safe one, because the two mistakes are not equally bad. Failing to decode
+   * an escaped label shows the reader `&lt;` where they wrote `<`: wrong, but
+   * cosmetic and visible. Decoding a label that was never escaped destroys
+   * data -- a sequence diagram carrying the URL `?id=5&reg=US&copy=1` comes
+   * out as `?id=5(R)=US(C)=1`, because a textarea also resolves the legacy
+   * semicolon-less references, and nothing in the picture says it happened.
+   *
+   * Measured against mermaid 10.9.1 with a `<` in a label, reading the raw
+   * text nodes: flowchart-v2, classDiagram, stateDiagram, block, gantt and pie
+   * hold `&lt;`; sequence, er, journey, timeline, mindmap and c4 hold `<`
+   * verbatim. Anything mermaid adds later is left alone until it is measured.
+   */
+  var ESCAPES_LABELS = {
+    'flowchart-v2': 1, 'classDiagram': 1, 'stateDiagram': 1,
+    'block': 1, 'gantt': 1, 'pie': 1
+  };
+
+  function decodeLabels(svg) {
+    if (!ESCAPES_LABELS[svg.getAttribute('aria-roledescription') || '']) return;
+    svg.querySelectorAll('text').forEach(function (el) {
+      var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (var node; (node = walker.nextNode());) {
+        var decoded = decodeEntitiesOnce(node.nodeValue);
+        if (decoded !== node.nodeValue) node.nodeValue = decoded;
+      }
+    });
+  }
+
+  /**
+   * Applies --font to labels the theme font could not reach.
+   *
+   * mermaid's top-level fontFamily lands in `#<id>{font-family:...}`, which a
+   * few renderers then override on the elements themselves. Clearing those
+   * overrides lets the root rule apply, which is the whole promise of --font.
+   *
+   * EXCEPT for C4, which is skipped entirely. Every other type re-measures its
+   * text in the configured family before laying anything out, so restyling is
+   * safe. The C4 renderer ignores the fontFamily config, measures and wraps in
+   * a hard-coded "Open Sans", and draws the result inside shapes whose widths
+   * are already fixed -- so re-fonting it afterwards is a measure-then-restyle
+   * bug. Measured with --font "Courier New": a person's description grows from
+   * 349 to 428 units inside a 369-wide box and spills 30 units past each edge,
+   * where the text is white on a white page and simply disappears. Losing
+   * characters is far worse than a font flag quietly not applying, so C4 keeps
+   * the font it was measured in. The README says so under the option table.
+   */
+  function applyFont(svg) {
+    if ((svg.getAttribute('aria-roledescription') || '') === 'c4') return;
+    svg.querySelectorAll('[font-family]').forEach(function (el) {
+      el.removeAttribute('font-family');
+    });
+    svg.querySelectorAll('[style*="font-family"]').forEach(function (el) {
+      el.style.removeProperty('font-family');
+      if (!el.getAttribute('style')) el.removeAttribute('style');
+    });
+  }
+
+  window.addEventListener('load', async function () {
+    var result = { total: 0, diagrams: [], error: null };
+    try {
+      var cfg = JSON.parse(document.getElementById('cfg').textContent);
+      var md = decodeMarkdown(document.getElementById('src').textContent);
+
+      if (cfg.background !== 'transparent' && !isColour(cfg.background)) {
+        throw new Error('unrecognised --background colour "' + cfg.background + '"');
+      }
+
+      // Extraction is the PDF template's own logic, step for step: parse with
+      // marked, turn every mermaid fence into a .mermaid element, then take
+      // the .mermaid elements in document order.
+      //
+      // Two reasons it is done this way rather than with a regex over the
+      // markdown. A regex disagrees with the parser at the edges -- tilde
+      // fences, longer fences, a fence indented inside a list item, and a
+      // mermaid fence QUOTED inside a wider fence, which is documentation and
+      // not a diagram. And selecting `.mermaid` rather than only the fences
+      // also picks up a raw <div class="mermaid"> written directly in the
+      // markdown, which the PDF path renders -- so the two commands cannot
+      // disagree about what the document contains.
+      marked.setOptions({ gfm: true, breaks: false });
+      var sandbox = document.createElement('div');
+      sandbox.innerHTML = marked.parse(md);
+      sandbox.querySelectorAll('pre > code.language-mermaid').forEach(function (code) {
+        var div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = code.textContent;
+        code.parentElement.replaceWith(div);
+      });
+      var blocks = sandbox.querySelectorAll('.mermaid');
+      result.total = blocks.length;
+
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: cfg.theme,
+        securityLevel: 'loose',
+        fontFamily: cfg.fontFamily || undefined,
+        // htmlLabels:false keeps labels as <text>/<tspan>. Labels drawn with
+        // htmlLabels:true live inside a <foreignObject>, which browsers render
+        // and Illustrator, Inkscape, Figma and librsvg do not -- the text
+        // simply vanishes. An exported file is likely to be opened somewhere
+        // other than a browser, so portability is the default here even though
+        // the PDF path chooses the richer labels. --html-labels opts back in.
+        flowchart: { htmlLabels: cfg.htmlLabels, useMaxWidth: false },
+        class: { htmlLabels: cfg.htmlLabels, useMaxWidth: false },
+        // useMaxWidth is configured per diagram type, so every type has to be
+        // named. normaliseSize() is the backstop for the ones that ignore it.
+        sequence: { useMaxWidth: false }, gantt: { useMaxWidth: false },
+        journey: { useMaxWidth: false }, state: { useMaxWidth: false },
+        er: { useMaxWidth: false }, pie: { useMaxWidth: false },
+        requirement: { useMaxWidth: false }, mindmap: { useMaxWidth: false },
+        timeline: { useMaxWidth: false }, gitGraph: { useMaxWidth: false },
+        c4: { useMaxWidth: false }, sankey: { useMaxWidth: false },
+        quadrantChart: { useMaxWidth: false }, xyChart: { useMaxWidth: false },
+        block: { useMaxWidth: false }
+      });
+
+      var stage = document.getElementById('stage');
+      // The text that actually ends up in a file, accumulated for the font
+      // check below.
+      var drawn = '';
+      for (var i = 0; i < blocks.length; i++) {
+        var index = i + 1;
+        var source = blocks[i].textContent;
+        // Fixed prefix, then position, then a hash of the source. The prefix
+        // guarantees a valid CSS identifier whatever the document is called:
+        // mermaid feeds this id straight into querySelector('#' + id), so an
+        // id starting with a digit or containing a dot or a space throws from
+        // deep inside mermaid with a message that names neither the diagram
+        // nor the file.
+        var id = 'md2pdf-' + (index < 10 ? '0' + index : index) + '-' + sourceHash(source);
+        var entry = { index: index, id: id, ok: false, error: null, width: 0, height: 0 };
+
+        var figure = document.createElement('figure');
+        figure.className = 'diagram';
+        stage.appendChild(figure);
+
+        try {
+          // render(), not run(): it takes the id (so the ids inside the file
+          // are ours, and the same diagram always exports to the same bytes),
+          // it hands back the markup directly, and it THROWS on a bad diagram
+          // instead of quietly drawing mermaid's "Syntax error" box -- a
+          // picture of a failure that every automated check counts as success.
+          var rendered = await mermaid.render(id, source);
+          figure.innerHTML = rendered.svg;
+          var svg = figure.querySelector('svg');
+          if (!svg) throw new Error('mermaid returned no SVG');
+
+          // render() throwing is NOT the whole guarantee. Two ways a diagram
+          // comes back "successful" and wrong, both measured:
+          //  - mermaid draws its error placeholder and marks it with this
+          //    attribute rather than throwing (the PDF path checks the same
+          //    thing, for the same reason);
+          //  - a fence whose body is just "flowchart TD", with no nodes at
+          //    all, renders happily as a blank 16x16 canvas. Exporting that as
+          //    a success hands the user an empty file for a typo. The smallest
+          //    real diagram measured across every type is ~39px on its short
+          //    side, so 24 separates them with room on both sides.
+          if ((svg.getAttribute('aria-roledescription') || '') === 'error') {
+            throw new Error('mermaid drew its "Syntax error" placeholder for this diagram');
+          }
+
+          var box = normaliseSize(svg);
+          if (box.width < 24 || box.height < 24) {
+            throw new Error(
+              'rendered empty (' + Math.round(box.width) + 'x' + Math.round(box.height) +
+              ' px) -- the fence declares a diagram type but has no content'
+            );
+          }
+
+          decodeLabels(svg);
+          if (cfg.fontFamily) applyFont(svg);
+          if (cfg.background !== 'transparent') paintBackground(svg, box, cfg.background);
+
+          entry.ok = true;
+          entry.width = box.width;
+          entry.height = box.height;
+          drawn += source + '\n';
+
+          var caption = document.createElement('figcaption');
+          caption.textContent = index + '. ' + id;
+          figure.appendChild(caption);
+        } catch (e) {
+          entry.error = String((e && e.message) || e).trim();
+          removeOrphans(id);
+          figure.className = 'diagram failed';
+          figure.innerHTML = '';
+          var head = document.createElement('strong');
+          head.textContent = 'Diagram ' + index + ' failed to render';
+          var detail = document.createElement('pre');
+          detail.textContent = entry.error;
+          figure.appendChild(head);
+          figure.appendChild(detail);
+        }
+        result.diagrams.push(entry);
+      }
+
+      // Missing CJK fonts matter MORE here than in the PDF. There the reader
+      // at least has a file they can re-render once a font is installed; a PNG
+      // has the empty boxes baked into the pixels for good. Everything else
+      // succeeds -- every shape, arrow and colour is correct -- so nothing
+      // measured above would notice.
+      //
+      // Escapes rather than literal characters: this file travels between
+      // macOS, Linux and Windows editors, and a mangled encoding here would
+      // silently disable the check that catches unreadable output.
+      // Scanned over the DIAGRAM SOURCES, not the document. This command
+      // renders nothing but the diagrams, so Chinese prose wrapped around a
+      // set of English flowcharts says nothing about whether the output is
+      // readable -- and failing that run on a machine with no CJK font would
+      // be a refusal with no cause, on documents that are perfectly fine.
+      var CJK = /[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]/;
+      var sample = (drawn.match(CJK) || [])[0];
+      result.cjkNeeded = !!sample;
+      if (sample) {
+        // Compare RENDERED PIXELS, not advance widths: a missing glyph is
+        // drawn as a full-width .notdef box, so it measures exactly as wide as
+        // the real character and width tells the two apart not at all. If the
+        // character paints the same pixels as a private-use codepoint no font
+        // can map, the same box was used for both.
+        var ink = function (ch, family) {
+          var c = document.createElement('canvas');
+          c.width = 96; c.height = 96;
+          var x = c.getContext('2d', { willReadFrequently: true });
+          x.font = '72px ' + family;
+          x.textBaseline = 'top';
+          x.fillStyle = '#000';
+          x.fillText(ch, 4, 4);
+          var d = x.getImageData(0, 0, 96, 96).data, n = 0, h = 0;
+          for (var i = 3; i < d.length; i += 4) {
+            if (d[i] > 16) { n++; h = (h * 31 + i) >>> 0; }
+          }
+          return n + ':' + h;
+        };
+        // The family the diagrams actually used, not the page's -- mermaid
+        // draws with its own theme font unless --font replaced it.
+        var family = cfg.fontFamily ||
+          '"trebuchet ms", verdana, arial, sans-serif';
+        result.cjkOk = ink(sample, family) !== ink('\uE000', family);
+      } else {
+        result.cjkOk = true;
+      }
+    } catch (e) {
+      result.error = String((e && e.message) || e);
+    }
+
+    /**
+     * Serialises one diagram as a standalone SVG file.
+     *
+     * XMLSerializer rather than outerHTML: an .svg file is parsed as XML, and
+     * the HTML serialiser emits unclosed tags and drops the namespace
+     * declarations that foreignObject content needs, so the file opens in a
+     * browser (which is lenient) and fails everywhere else.
+     *
+     * `mult` is applied to width/height only, never to the viewBox: the
+     * drawing stays exactly the same, the file just declares a different
+     * natural size. Rewriting the viewBox instead would move the artwork.
+     */
+    window.__md2pdfSerialize = function (id, mult) {
+      var svg = document.getElementById(id);
+      if (!svg) return null;
+      var w = parseFloat(svg.getAttribute('width'));
+      var h = parseFloat(svg.getAttribute('height'));
+      var round = function (n) { return Math.round(n * 100) / 100; };
+      if (mult !== 1) {
+        svg.setAttribute('width', round(w * mult));
+        svg.setAttribute('height', round(h * mult));
+      }
+      var text = new XMLSerializer().serializeToString(svg);
+      if (mult !== 1) {
+        svg.setAttribute('width', w);
+        svg.setAttribute('height', h);
+      }
+      return '<?xml version="1.0" encoding="UTF-8"?>\n' + text + '\n';
+    };
+
+    window.__md2pdfResult = result;
+    document.body.dataset.renderDone = '1';
+  });
+</script>
+</body>
+</html>

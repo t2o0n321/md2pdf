@@ -645,6 +645,83 @@ test("footnotes are rendered instead of being swallowed", () => {
   assert(!dom.includes("Nothing refers to this one"), "an unreferenced definition was printed");
 });
 
+test("a CRLF checkout is read the same as an LF one", () => {
+  // git checks a document out with CRLF on Windows by default, and every
+  // line-oriented pass here anchors with `$` -- which in JavaScript matches the
+  // end of the STRING, while `.` refuses to match "\r". A line ending in "\r"
+  // therefore fails to match a pattern that works everywhere else, silently,
+  // and only on the one platform nobody develops on.
+  //
+  // Both variants are written here rather than trusting the fixture's own
+  // endings, which are whatever git happened to check out.
+  const { buildHtml } = require("../lib/buildHtml");
+  const { transformFootnotes } = require("../lib/footnotes");
+
+  const source = [
+    "# Doc",
+    "",
+    "A marker[^why] here.",
+    "",
+    "```mermaid",
+    "flowchart LR",
+    "    A --> B",
+    "```",
+    "",
+    "An example fence, quoted inside a wider one:",
+    "",
+    "````",
+    "```mermaid",
+    "QuotedNotADiagram",
+    "```",
+    "````",
+    "",
+    "[^why]: the note body",
+    "",
+  ].join("\n");
+
+  const built = {};
+  for (const [ending, text] of [["lf", source], ["crlf", source.replace(/\n/g, "\r\n")]]) {
+    const input = path.join(OUT, `line-endings-${ending}.md`);
+    const output = path.join(OUT, `line-endings-${ending}.html`);
+    fs.writeFileSync(input, text, "utf8");
+    const result = buildHtml({ input, output });
+    built[ending] = { html: fs.readFileSync(output, "utf8"), expects: result.expects };
+  }
+
+  // The footnote definition stops being recognised when the line ends in "\r",
+  // and marked then eats it as a link reference definition: the note vanishes
+  // from the document and the marker prints as a link reading "^why".
+  for (const ending of ["lf", "crlf"]) {
+    assert(
+      /<sup class="fnref"/.test(built[ending].html),
+      `the footnote was swallowed in the ${ending.toUpperCase()} document`
+    );
+  }
+
+  // The fence scanner goes blind for the same reason, which both zeroes the
+  // declared diagram count -- disarming the "declares N diagrams, page found
+  // none" check -- and stops quoted example fences being excluded from the
+  // prose, so their contents get read as claims about the document.
+  assert(
+    built.lf.expects.mermaid === 1 && built.crlf.expects.mermaid === 1,
+    `the quoted fence was miscounted: LF saw ${built.lf.expects.mermaid}, ` +
+      `CRLF saw ${built.crlf.expects.mermaid}, both should see 1`
+  );
+
+  // Nothing else may differ either.
+  assert(
+    built.lf.html === built.crlf.html,
+    "the two checkouts produced different documents"
+  );
+
+  // And the footnote module is an exported entry point, so it has to be right
+  // on its own rather than relying on its caller to normalise first.
+  assert(
+    transformFootnotes(source.replace(/\n/g, "\r\n")).used.length === 1,
+    "transformFootnotes did not recognise a definition in a CRLF document"
+  );
+});
+
 // ---------------------------------------------------------------------------
 // md2pdf mermaid -- one image file per diagram, and nothing else
 // ---------------------------------------------------------------------------

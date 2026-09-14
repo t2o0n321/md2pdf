@@ -2,6 +2,14 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
+<!-- Relative URLs resolve against the MARKDOWN's folder, not this file's.
+     This page is generated into a temp directory, so `images/shot.png` would
+     otherwise be looked for next to the temp file and always be missing --
+     which is how a hand-written <img src="images/x.png"> ends up blank. One
+     base covers img/srcset/source/a/url() alike; per-attribute rewriting would
+     have to enumerate them and would still miss CSS. It must stay ahead of any
+     relative URL in the document, hence its position here. -->
+<base href="__DOC_BASE__">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
 <script>
@@ -14,7 +22,18 @@
 <script src="__VENDOR_MERMAID__"></script>
 <script src="__VENDOR_MATHJAX__" id="MathJax-script"></script>
 <style>
-  :root { --ink:#1a1a1a; --muted:#555; --line:#d8dce0; --accent:#0b6; --head:#0a3d62; --band:#f2f5f8; }
+  :root {
+    --ink:#1a1a1a; --muted:#555; --line:#d8dce0; --accent:#0b6; --head:#0a3d62; --band:#f2f5f8;
+    /* Declared once, used by every monospace element. The mono placeholder
+       below must appear exactly once in this whole file, comments included:
+       buildHtml.js substitutes it with String.replace and a STRING pattern,
+       which only ever replaces the FIRST occurrence. A second one survives
+       verbatim into the CSS, kills the declaration it sits in, and takes
+       --mono-font down with it -- silently, since a browser just drops an
+       unparseable declaration. */
+    --mono: __MONO_PREPEND__ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code",
+            Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace;
+  }
   * { box-sizing: border-box; }
   html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body {
@@ -55,6 +74,41 @@
        width:auto lets the SVG keep its aspect ratio while height is bounded.
        Only oversized diagrams are affected; anything shorter is untouched. */
     .mermaid svg { max-height: calc(100vh - 140px); width: auto; }
+
+    /* overflow-x:auto is a screen affordance. On paper there is no scrollbar,
+       so every character past the column edge is cut off and the reader never
+       learns it was there -- a truncated command line still looks like a
+       command line. Wrapping is the only way the text survives the print. */
+    pre { overflow-x: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+    /* Same clipping, and MathJax cannot wrap a formula. Scaling the drawing
+       down keeps all of it on the sheet. */
+    mjx-container[display="true"] { overflow-x: visible; }
+    mjx-container[display="true"] svg { max-width: 100%; height: auto; }
+
+    /* Let long blocks break, but never strand a line or two of them on their
+       own. break-inside:avoid cannot help an element taller than the page: the
+       browser honours it by pushing the block to a fresh sheet, leaves the
+       current one nearly empty, and then has to break it anyway. orphans and
+       widows express the real intention and, unlike any height rule, need to
+       know nothing about the paper size. */
+    pre, blockquote, .callout { break-inside: auto; orphans: 3; widows: 3; }
+
+    /* Tables the same way, counted the only way CSS can count: a table with a
+       ninth body row is long enough that keeping it whole costs more than it
+       saves. Shorter ones keep the base rule. The header repeats on every page
+       a long table reaches, which is the point of breaking it at all. */
+    table:has(> tbody > tr:nth-child(9)) { break-inside: auto; }
+    tr, th, td { break-inside: avoid; }
+    thead { display: table-header-group; }
+
+    /* A picture taller than the sheet gets sliced, and the tail of it lands on
+       an otherwise blank page. Bounded like the diagrams above, and for the
+       same reason vh is the right unit. Only images the author did not size:
+       an explicit width means a deliberate, usually small, element (a badge
+       row), and clamping those would resize what someone chose by hand. */
+    img:not([width]):not([style*="width"]),
+    svg:not([width]) { max-height: calc(100vh - 140px); width: auto; }
   }
   h1 { font-size: 23px; color: var(--head); border-bottom: 3px solid var(--head);
        padding-bottom: 10px; margin: 6px 0 18px; line-height: 1.35; }
@@ -63,16 +117,44 @@
        break-after: avoid; }
   h3 { font-size: 14.5px; color: #16406b; margin: 20px 0 8px; break-after: avoid; }
   h4 { font-size: 13px; color: #16406b; margin: 16px 0 6px; break-after: avoid; }
+  /* h5/h6 exist and documents use them. Left to the UA they come out SMALLER
+     than the body text they introduce, which reads as a mistake. */
+  h5 { font-size: 12.5px; color: #16406b; margin: 14px 0 4px; break-after: avoid; }
+  h6 { font-size: 12.5px; color: var(--muted); margin: 14px 0 4px; break-after: avoid; }
   p { margin: 8px 0; }
-  a { color: #0b6; word-break: break-all; }
-  strong { color: #111; }
-  code { font-family: __MONO_PREPEND__ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code",
-                      Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace;
-         background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 0.88em;
+  /* break-all only where it is needed. Applied to every link it hyphenates
+     ordinary link TEXT mid-word ("responsibiliti / es configured"), which is
+     not what it was for: the case it exists for is a bare URL with no break
+     opportunity in it. anywhere breaks long unbroken runs and leaves real
+     words alone. */
+  a { color: #0b6; overflow-wrap: anywhere; }
+  /* Inherit, do not impose. A fixed colour here overrides whatever colour the
+     surrounding text set, so bold inside a coloured callout or table cell
+     jumped back to near-black. */
+  strong, b { font-weight: 700; }
+  /* Every monospace element, including the ones the UA draws in whatever
+     monospace font it happens to pick. <pre> is in the list because a <pre>
+     written by hand has no <code> inside it, so `pre code` never applies and
+     the block printed in the body face at body size. */
+  code, pre, samp, var, tt, kbd { font-family: var(--mono); }
+  code { background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 0.88em;
          color: #b03052; word-break: break-word; }
   pre { background: #f6f8fa; border: 1px solid var(--line); border-radius: 6px;
         padding: 10px 12px; overflow-x: auto; break-inside: avoid; }
   pre code { background: none; color: #24292f; padding: 0; font-size: 11px; line-height: 1.6; }
+  var { font-style: italic; }
+  /* Chrome's UA sheet gives <kbd> nothing but a monospace family, so a
+     shortcut prints as bare prose -- and adjacent keys fuse: `<kbd>⌘</kbd>
+     <kbd>K</kbd>` becomes the single token "⌘K", with nothing left to say
+     whether that is one key or two. A cap is what GitHub draws and what makes
+     the boundary survive onto paper. */
+  kbd { display: inline-block; padding: 1px 5px; margin: 0 1px; font-size: 0.82em;
+        line-height: 1.4; color: #24292f; background: #f6f8fa;
+        border: 1px solid #c7ccd1; border-bottom-width: 2px; border-radius: 4px;
+        white-space: nowrap; }
+  /* A cap inside a cap: <kbd><kbd>Ctrl</kbd>+<kbd>C</kbd></kbd> is legal and
+     means one chord, not three boxes. */
+  kbd kbd { padding: 0; margin: 0; font-size: 1em; background: none; border: 0; }
   blockquote { margin: 12px 0; padding: 8px 14px; background: #f7faf8;
                border-left: 4px solid var(--accent); color: #33475b; border-radius: 3px;
                break-inside: avoid; }
@@ -99,20 +181,138 @@
   .callout[data-callout="example"]   { --c: #7c3aed; }
   .callout[data-callout="quote"]     { --c: #6b7280; }
   mark { background: #fff3a3; padding: 0 2px; border-radius: 2px; }
+  /* Footnotes (lib/footnotes.js turns [^1] into these). Kept quiet: the
+     marker should be findable without competing with the sentence it sits in. */
+  .fnref { line-height: 0; }
+  .fnref a { text-decoration: none; }
+  hr.footnotes-sep { margin: 28px 0 8px; }
+  .footnotes { font-size: 0.92em; color: var(--muted); }
+  .footnotes ol { padding-left: 22px; }
+  .footnotes li { margin: 2px 0; }
+  .footnotes li > p { margin: 2px 0; }
   /* A wikilink has no target in a PDF, so it is shown as marked-up text
      rather than a link that goes nowhere. */
   .wikilink { color: #4c7fd6; border-bottom: 1px dotted currentColor; }
   ul, ol { margin: 8px 0; padding-left: 26px; }
   li { margin: 4px 0; }
   li input[type=checkbox] { margin-right: 7px; transform: scale(1.15); }
-  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 11.8px;
+  /* A definition list looks like four plain lines without this -- nothing
+     distinguishes the terms from what defines them. */
+  dl { margin: 10px 0; }
+  dt { font-weight: 600; color: #16406b; margin-top: 8px; }
+  dd { margin: 2px 0 0 20px; }
+  /* The UA gives <figure> a 40px inline margin, which pushes a figure out of
+     line with every other block on the page and reads as a layout error. */
+  figure { margin: 14px 0; break-inside: avoid; }
+  figcaption { font-size: 0.9em; color: var(--muted); margin-top: 4px; }
+  /* Ruby annotations collide with the line above at this line-height; CJK
+     documents are exactly the ones that use them. */
+  ruby { line-height: 2.4; }
+  rt { font-size: 0.55em; line-height: 1.1; }
+  /* title="" is a tooltip, and a printed page has no pointer. The expansion is
+     appended after the abbreviation instead, so it is not simply lost. */
+  abbr[title] { text-decoration: underline dotted; text-underline-offset: 2px; }
+  abbr[title]::after { content: " (" attr(title) ")"; color: var(--muted);
+                       font-size: 0.9em; text-decoration: none; }
+  /* Form controls print as dead UI. Given the page's own typeface they at
+     least read as part of the document rather than as a browser artefact. */
+  button, select, input, textarea { font: inherit; font-size: 0.95em; }
+  button, select { padding: 1px 8px; border: 1px solid var(--line);
+                   border-radius: 4px; background: #f6f8fa; }
+  table { border-collapse: collapse; margin: 14px 0; font-size: 11.8px;
           break-inside: avoid; }
+  /* Full width is a default for pipe tables, which have no syntax for saying
+     otherwise; a hand-written table that states its own width means it. Written
+     as :not() rather than a `table[width] { width: auto }` override, because
+     auto would beat the width="" presentational hint instead of deferring to
+     it -- the table would size to its contents and the declared width would
+     still be lost. */
+  /* Not for a table that was aligned by hand either: centring a full-width
+     table changes nothing, and `align="center"` is only ever written by
+     someone who wants the table to shrink to its contents and sit in the
+     middle. */
+  table:not([width]):not([align]) { width: 100%; }
   th, td { border: 1px solid var(--line); padding: 7px 9px; text-align: left;
            vertical-align: top; }
+  /* align= and valign= are presentational hints, and ANY author rule outranks
+     them -- so the two declarations above silently killed every
+     `<td align="center">` in every hand-written table, and every alignment row
+     (|:---:|) in every pipe table, since marked emits the same attribute.
+     Restating them as attribute selectors puts them back in an origin that can
+     win. Left unqualified on purpose: `<p align>`, `<div align>` and
+     `<img align>` are all legal and all mean the same thing. */
+  [align="left"]    { text-align: left; }
+  [align="center"]  { text-align: center; }
+  [align="right"]   { text-align: right; }
+  [align="justify"] { text-align: justify; }
+  /* On a <tr> (or a <thead>/<tbody>) align= applies to the cells, and the rule
+     above cannot deliver that: text-align does inherit, but `th, td` sets its
+     own and beats anything inherited. The cells have to be named. */
+  tr[align="left"] > *, thead[align="left"] > tr > *, tbody[align="left"] > tr > *       { text-align: left; }
+  tr[align="center"] > *, thead[align="center"] > tr > *, tbody[align="center"] > tr > * { text-align: center; }
+  tr[align="right"] > *, thead[align="right"] > tr > *, tbody[align="right"] > tr > *    { text-align: right; }
+  /* On a <table>, align= centres the TABLE, not its text -- the rule above
+     would otherwise quietly centre every cell in it instead. */
+  table[align="center"] { margin-left: auto; margin-right: auto; text-align: initial; }
+  table[align="left"]   { margin-right: auto; margin-left: 0; text-align: initial; }
+  table[align="right"]  { margin-left: auto; margin-right: 0; text-align: initial; }
+  [valign="top"]      { vertical-align: top; }
+  [valign="middle"]   { vertical-align: middle; }
+  [valign="bottom"]   { vertical-align: bottom; }
+  [valign="baseline"] { vertical-align: baseline; }
+  tr[valign="middle"] > * { vertical-align: middle; }
+  tr[valign="bottom"] > * { vertical-align: bottom; }
+  /* border="0" is how a table used purely for layout -- two screenshots side
+     by side, a badge row -- says "draw no grid". The border above outranks the
+     attribute, so those layouts printed inside a visible box. */
+  table[border="0"] > * > tr > th, table[border="0"] > * > tr > td { border: 0; }
+  table[cellpadding="0"] > * > tr > th, table[cellpadding="0"] > * > tr > td { padding: 0; }
   th { background: var(--head); color: #fff; font-weight: 600; }
-  tbody tr:nth-child(even) { background: #f6f8fa; }
-  img { max-width: 100%; height: auto; }
+  /* A hand-coloured row means it. bgcolor already lands as a presentational
+     hint on the <tr>, but the cells then paint the header fill or the zebra
+     stripe over it; inheriting hands the row's own colour back. */
+  tr[bgcolor] > th, tr[bgcolor] > td { background: inherit; }
+  /* A row header (`<th scope="row">`) is a label in the first column, not a
+     banner across the top; the dark fill makes a comparison table unreadable. */
+  tbody th[scope="row"] { background: #eef2f6; color: var(--ink); }
+  caption { caption-side: top; font-weight: 600; color: var(--muted);
+            text-align: left; padding: 0 2px 6px; font-size: 0.95em; }
+  /* Only stripe tables that actually have a header row. A hand-written table
+     whose first row is a plain <tr> puts every row in tbody, and striping then
+     shades the wrong ones -- most visibly, a two-row image layout comes out
+     with one cell grey. Pipe tables always produce a thead, so they are
+     unaffected.
+     Child combinators throughout: with descendant ones a header-less table
+     NESTED inside a striped table matches on the outer table's thead and gets
+     shaded anyway. A row that names its own colour is left alone. */
+  table:has(> thead) > tbody > tr:nth-child(even):not([bgcolor]) { background: #f6f8fa; }
+  /* height:auto keeps the aspect ratio when max-width has to shrink a picture
+     -- but applied to every image it also overrode height="", and that is the
+     spelling every badge row uses (`<img src="build.svg" height="20">`), so
+     badges printed at full size. Scoped to images that did not ask for a
+     height, which is what GitHub does too. */
+  img { max-width: 100%; }
+  img:not([height]) { height: auto; }
+  /* Inline SVG pasted into the document is not clamped by the <img> rule and
+     happily runs off the sheet. MathJax draws its formulas as SVG too, and
+     those are sized in ex units that must not be touched here; the print
+     block scales them when they are genuinely too wide. */
+  svg { max-width: 100%; }
+  mjx-container svg { max-width: none; }
+  /* A reader cannot expand a <details> in a PDF, so a collapsed one is just
+     content that silently did not print. The page script opens them all; this
+     keeps the marker from implying otherwise. */
+  details { break-inside: avoid; margin: 10px 0; }
+  details > summary { font-weight: 600; cursor: default; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
   hr { border: none; border-top: 1px solid var(--line); margin: 24px 0; }
+  /* Stands in for an <iframe>/<video>/<audio> the page script removed, none of
+     which can play on paper. */
+  .media-placeholder { border: 1px dashed var(--line); border-radius: 6px;
+                       background: #fafbfc; padding: 10px 12px; margin: 14px 0;
+                       break-inside: avoid; }
+  .media-placeholder img { display: block; margin-bottom: 6px; }
+  .media-label { font-size: 0.9em; color: var(--muted); overflow-wrap: anywhere; }
   .mermaid { text-align: center; margin: 16px 0; break-inside: avoid; }
   .mermaid svg { max-width: 100%; height: auto; }
   mjx-container[display="true"] { margin: 14px 0 !important; overflow-x: auto; }
@@ -127,10 +327,93 @@
     var stats = { mermaidTotal: 0, mermaidOk: 0, mermaidFailed: 0, math: 0,
                   tables: 0, headings: 0, images: 0, imagesFailed: 0 };
     try {
-      var src = document.getElementById('src').textContent;
+      // buildHtml.js put a backslash in front of every `<script` / `</script`
+      // so neither could close this block early. Take exactly one back off --
+      // one, so a document that genuinely contains `<\/script` gets it back
+      // rather than having it turned into a live tag.
+      var src = document.getElementById('src').textContent
+        .replace(/<(\\+)(\/?)(script)/gi, function (_, slashes, slash, tag) {
+          return '<' + slashes.slice(1) + slash + tag;
+        });
       marked.setOptions({ gfm: true, breaks: false });
       var content = document.getElementById('content');
       content.innerHTML = marked.parse(src);
+
+      // ----- raw HTML the author wrote by hand ----------------------------
+      // Markdown lets a document drop into HTML at any point, and a few tags
+      // only make sense on a screen. Printing them as-is loses content
+      // silently, which is the one failure mode this renderer exists to avoid.
+
+      // <details> is collapsed by default and nothing in a PDF can open it,
+      // so its body would simply not be in the file. Open every one.
+      document.querySelectorAll('details').forEach(function (d) { d.open = true; });
+
+      // loading="lazy" is ordinary README markup and, off-screen in a headless
+      // window, means "never load". The wait for images below then never
+      // finishes, the run times out after 90 seconds and produces no PDF at
+      // all. There is no scrolling on paper, so the attribute has no meaning
+      // here beyond that.
+      document.querySelectorAll('img[loading="lazy"]').forEach(function (img) {
+        img.loading = 'eager';
+      });
+
+      // <iframe>, <video>, <audio>, <embed> and <object> cannot play on paper.
+      // Left alone they print whatever the element falls back to, which is
+      // usually worse than nothing: an embedded player prints its own error
+      // screen, a <video> prints a dead control bar. Say what was there and
+      // where it lives instead, and keep the poster frame if there is one.
+      document.querySelectorAll('iframe, video, audio, embed, object').forEach(function (el) {
+        var inner = el.querySelector('source');
+        var url = el.getAttribute('src') || el.getAttribute('data') ||
+                  (inner && inner.getAttribute('src')) || '';
+        var box = document.createElement('div');
+        box.className = 'media-placeholder';
+
+        var poster = el.getAttribute('poster');
+        if (poster) {
+          var shot = document.createElement('img');
+          shot.src = poster;
+          shot.alt = el.getAttribute('title') || '';
+          box.appendChild(shot);
+        }
+
+        var label = document.createElement('div');
+        label.className = 'media-label';
+        label.textContent = (el.getAttribute('title') || el.tagName.toLowerCase()) +
+                            (url ? ' — ' : '');
+        if (url) {
+          var link = document.createElement('a');
+          link.href = url;
+          link.textContent = url;
+          label.appendChild(link);
+        }
+        box.appendChild(label);
+        el.replaceWith(box);
+      });
+
+      // Headings need ids or every "- [Jump to X](#x)" table of contents --
+      // which is most READMEs -- points at nothing once printed. marked
+      // stopped emitting them in v12, so the GitHub slug rule is reproduced
+      // here: lowercase, drop punctuation, spaces to hyphens, and number the
+      // duplicates in document order. CJK is deliberately left intact, which
+      // is what GitHub does and what "#小節-a" in a Chinese README relies on.
+      var PUNCT = /["'`~!@#$%^&*()+=\[\]{}\\|;:,.<>?\/‘’“”…·、。，；：？！「」『』（）《》〈〉【】〔〕—～]/g;
+      var seen = Object.create(null);
+      content.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(function (h) {
+        if (h.id) return;
+        var base = h.textContent.trim().toLowerCase().replace(PUNCT, '').replace(/\s+/g, '-');
+        if (!base) return;
+        var n = seen[base] || 0;
+        seen[base] = n + 1;
+        h.id = n ? base + '-' + n : base;
+      });
+
+      // Leave href="#..." exactly as authored. Measured against Chrome 152:
+      // a bare fragment prints as a real internal PDF destination even though
+      // <base> points at another folder, while the same link rewritten to an
+      // absolute self-URL prints as a /URI pointing at this file -- which is
+      // in a temp directory that is deleted straight after. "Helpfully"
+      // resolving these turns a working jump into a dead link.
 
       // ----- Obsidian / GitHub callouts: > [!NOTE], > [!WARNING] ... -------
       // marked turns these into a plain blockquote whose first paragraph
@@ -169,7 +452,10 @@
         box.setAttribute('data-callout', kind);
         var titleEl = document.createElement('div');
         titleEl.className = 'callout-title';
-        titleEl.textContent = title;
+        // innerHTML, not textContent: `title` was cut out of the paragraph's
+        // own innerHTML, so marked has already turned any emphasis in it into
+        // tags. Setting it as text printed those tags as visible source.
+        titleEl.innerHTML = title;
         var body = document.createElement('div');
         body.className = 'callout-body';
         while (bq.firstChild) body.appendChild(bq.firstChild);
@@ -198,7 +484,12 @@
       var textNodes = [];
       for (var tn; (tn = walker.nextNode());) textNodes.push(tn);
 
-      var INLINE = /\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]|==([^=\n]+)==/g;
+      // The highlight half requires a non-space character just inside each
+      // pair of `=`. Without that, prose comparing two things -- `if (a == b)
+      // and (c == d)` outside backticks -- matches from the first `==` to the
+      // second, and the operators disappear into a yellow block. Obsidian
+      // applies the same restriction.
+      var INLINE = /\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]|==(\S(?:[^=\n]*\S)?)==/g;
       textNodes.forEach(function (node) {
         var text = node.nodeValue;
         if (text.indexOf('[[') === -1 && text.indexOf('==') === -1) return;
@@ -325,9 +616,16 @@
         });
       }));
       stats.images = document.images.length;
-      stats.imagesFailed = Array.prototype.filter.call(document.images, function (img) {
+      var broken = Array.prototype.filter.call(document.images, function (img) {
         return !img.naturalWidth;
-      }).length;
+      });
+      stats.imagesFailed = broken.length;
+      // Which ones. "3 of 4 images failed" tells the author there is a problem
+      // and nothing at all about where to look; in a document with forty
+      // screenshots that is most of the work left to do.
+      stats.brokenImages = broken.slice(0, 5).map(function (img) {
+        return img.getAttribute('src') || img.currentSrc || '(no src)';
+      });
 
       document.body.dataset.stats = JSON.stringify(stats);
       document.body.setAttribute('data-render-done', '1');

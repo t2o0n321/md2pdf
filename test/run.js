@@ -96,6 +96,22 @@ function renderedDom(htmlPath) {
 }
 
 /**
+ * Computed styles of matched elements, for the rules that only exist in CSS.
+ *
+ * `<td align="center">` keeps that attribute whatever the stylesheet does, so
+ * asserting on the markup proves nothing about where the text ends up.
+ */
+function computed(htmlPath, selector, props, ...flags) {
+  const r = spawnSync(
+    process.execPath,
+    [path.join(__dirname, "computed.js"), htmlPath, selector, props, ...flags],
+    { encoding: "utf8" }
+  );
+  assert(r.status === 0, `computed.js failed: ${(r.stderr || "").trim()}`);
+  return JSON.parse(r.stdout);
+}
+
+/**
  * Opens a written .svg in a browser and reports what parsed.
  *
  * Asserting on the file's text would pass for a file that is malformed XML or
@@ -451,6 +467,182 @@ test("an embed that cannot be found is reported, not silently blank", () => {
     /could not be found/.test(r.output) && /definitely-not-here/.test(r.output),
     `expected the missing filename to be named, got: ${r.output.trim()}`
   );
+});
+
+// ---------------------------------------------------------------------------
+// Raw HTML, which Markdown allows anywhere and which documents actually use
+// ---------------------------------------------------------------------------
+
+const HTML_PAGE = path.join(FIXTURES, "html", "page.md");
+const HTML_BUILT = path.join(OUT, "html-page.html");
+
+// One render, several tests: each browser launch costs a second or two, and
+// every assertion below is about the same document.
+let htmlRun = null;
+function htmlPage() {
+  if (!htmlRun) {
+    const r = md2pdf(HTML_PAGE, "-o", path.join(OUT, "html-page.pdf"), "--keep-html", HTML_BUILT);
+    htmlRun = r;
+  }
+  return htmlRun;
+}
+
+test("relative images resolve against the markdown, not the temp HTML", () => {
+  // The built page lives in a temp directory, so `images/left.png` -- written
+  // by hand in an <img>, or as a markdown image -- resolves next to the temp
+  // file and is missing. This is the bug that made hand-written HTML tables of
+  // screenshots print blank.
+  const r = htmlPage();
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+  assert(/5\/5 images/.test(r.output), `expected all 5 images to load, got: ${r.output.trim()}`);
+
+  // ...and the fenced <img> sample is not counted as an image to find.
+  const dom = renderedDom(HTML_BUILT);
+  assert(
+    dom.includes("&lt;img src=\"images/does-not-exist.png\"&gt;"),
+    "the fenced <img> sample was not left alone"
+  );
+});
+
+test("markup that is quoted is not counted as markup that is present", () => {
+  // The counts in inspect() decide whether the render is accepted, so anything
+  // they misread is a document that cannot be converted at all. Every form
+  // below appears in an ordinary README -- this project's own included -- and
+  // each one used to be read as a claim: a ```mermaid fence nested inside a
+  // ````markdown example, $$ inside that example, an <img> in a code span, and
+  // an <img> inside an HTML comment.
+  // Exit 0 IS the assertion: a miscount makes the source claim a diagram or a
+  // formula the page then cannot produce, and verification refuses the whole
+  // document -- "source declares 1 mermaid block(s) but the page found none".
+  const r = htmlPage();
+  assert(r.code === 0, `expected success, got exit ${r.code}.\n        ${r.output.trim()}`);
+  assert(/0\/0 diagrams/.test(r.output), `the nested fence was miscounted: ${r.output.trim()}`);
+  assert(/0 formulas/.test(r.output), `quoted $$ was counted as a formula: ${r.output.trim()}`);
+  // The comment survives as a comment node, which is the point -- what must
+  // not happen is it being counted as an image the render has to produce.
+  const commented = computed(HTML_BUILT, 'img[src*="in-a-comment"]', "display");
+  assert(commented.length === 0, "an <img> inside an HTML comment was rendered");
+});
+
+test("what only breaks on paper: wrapping, lazy images, explicit heights", () => {
+  htmlPage();
+  // overflow-x:auto is a screen affordance. In print there is no scrollbar, so
+  // anything past the column edge is simply not in the file -- and a truncated
+  // command still looks like a command.
+  // Every block, not the first one: the short ones fit whatever the rule says,
+  // so checking only those passes with the clipping fully in place.
+  const pres = computed(HTML_BUILT, "pre", "white-space", "--print");
+  assert(pres.length >= 3, `expected several code blocks, found ${pres.length}`);
+  for (const pre of pres) {
+    assert(
+      pre.scrollWidth <= pre.clientWidth + 1,
+      `a code line is clipped in print: ${pre.scrollWidth}px of content in ` +
+        `${pre.clientWidth}px (${pre.text.slice(0, 30)})`
+    );
+  }
+
+  // loading="lazy" below the fold means "never" in a headless window: the wait
+  // for images never finishes and the run dies on the 90s timeout.
+  const lazy = computed(HTML_BUILT, 'img[alt="lazy"]', "display");
+  assert(lazy.length === 1 && lazy[0].width > 0, "the lazy image never loaded");
+
+  // height="" is how every badge row is written.
+  const [badge] = computed(HTML_BUILT, 'img[height="14"]', "height");
+  assert(badge && badge.props.height === "14px", `badge height ignored: ${JSON.stringify(badge)}`);
+});
+
+test("== in prose is an operator, not a highlight", () => {
+  htmlPage();
+  // The highlight rule used to match from the first `==` to the second, which
+  // swallowed the operators and everything between them into a yellow block.
+  const dom = renderedDom(HTML_BUILT);
+  assert(dom.includes("(a == b) and (c == d)"), `the comparison was eaten: ${dom.slice(0, 300)}`);
+  assert(/<mark>this really is one<\/mark>/.test(dom), "a real highlight stopped working");
+});
+
+test("align and valign survive on hand-written and pipe tables alike", () => {
+  htmlPage();
+  // Presentational attributes lose to any author rule, so `th, td { text-align:
+  // left }` silently flattened every centred cell -- in raw HTML and in pipe
+  // tables both, since marked emits the same attribute for |:---:|.
+  const cells = computed(HTML_BUILT, "td[align], th[align]", "text-align");
+  assert(cells.length >= 5, `expected aligned cells, found ${cells.length}`);
+  for (const cell of cells) {
+    assert(
+      cell.props["text-align"] !== "left" || /Left|^a$/.test(cell.text),
+      `a cell aligned in the source rendered left: ${JSON.stringify(cell)}`
+    );
+  }
+  const centred = cells.filter((c) => c.props["text-align"] === "center");
+  const right = cells.filter((c) => c.props["text-align"] === "right");
+  assert(centred.length >= 3, `expected centred cells, got ${centred.length}`);
+  assert(right.length >= 2, `expected right-aligned cells, got ${right.length}`);
+
+  const vertical = computed(HTML_BUILT, "td[valign]", "vertical-align").map(
+    (c) => c.props["vertical-align"]
+  );
+  assert(
+    vertical.includes("middle") && vertical.includes("bottom"),
+    `valign was overridden by the stylesheet: ${vertical.join(", ")}`
+  );
+});
+
+test("a <details> block is opened, so its content is in the PDF", () => {
+  htmlPage();
+  // Nothing in a PDF can expand a disclosure widget. Left collapsed, the body
+  // is simply not in the file, and nothing else here would notice.
+  //
+  // Measured as "the block is taller than its own summary", not as the body's
+  // own height: a closed <details> hides its subtree with content-visibility,
+  // and Chrome still reports a box for elements inside it, so asking the
+  // paragraph how tall it is answers yes either way.
+  const [box] = computed(HTML_BUILT, "details", "display");
+  const [summary] = computed(HTML_BUILT, "details > summary", "display");
+  assert(box && summary, "no <details> in the rendered document");
+  assert(
+    box.height > summary.height + 8,
+    `the details block printed collapsed: ${box.height}px for a ${summary.height}px summary`
+  );
+});
+
+test("headings get ids, so a table of contents still jumps in the PDF", () => {
+  const r = htmlPage();
+  assert(r.code === 0, `expected success, got exit ${r.code}`);
+  const dom = renderedDom(HTML_BUILT);
+  assert(/<h2 id="side-by-side"/.test(dom), `no GitHub-style heading id: ${dom.slice(0, 200)}`);
+  assert(/<h2 id="collapsed-detail"/.test(dom), "heading id was not slugged as GitHub does");
+
+  // Chrome prints a bare href="#x" as a real internal destination, but only if
+  // something has that id -- and marked stopped emitting them in v12. Checked
+  // in the PDF itself, because that is where it either works or does not.
+  const pdf = fs.readFileSync(path.join(OUT, "html-page.pdf"), "latin1");
+  assert(pdf.includes("/Dest"), "the PDF has no internal link destinations");
+});
+
+test("footnotes are rendered instead of being swallowed", () => {
+  htmlPage();
+  // To CommonMark `[^why]: text` is a link reference definition, so without
+  // handling the note is consumed as a URL and vanishes, while `[^why]` in the
+  // prose prints as a link reading "^why".
+  const dom = renderedDom(HTML_BUILT);
+  assert(/<sup class="fnref" id="fnref-1"/.test(dom), "the footnote marker was not rendered");
+  assert(
+    dom.includes("link reference definition"),
+    "the footnote's own text is missing from the document"
+  );
+  assert(
+    dom.includes("A second paragraph, indented"),
+    "the indented continuation of a footnote was dropped"
+  );
+  // Referenced twice, numbered once.
+  assert(
+    (dom.match(/href="#fn-1"/g) || []).length === 2,
+    "the second reference to the same note did not reuse its number"
+  );
+  // A character class in prose is not a footnote: there is no definition for it.
+  assert(dom.includes("[^a-z]"), "a regex character class was mistaken for a footnote");
+  // A definition nothing refers to is dropped, as on GitHub.
+  assert(!dom.includes("Nothing refers to this one"), "an unreferenced definition was printed");
 });
 
 // ---------------------------------------------------------------------------
@@ -828,12 +1020,12 @@ test("labels containing < & > survive, and a raw div.mermaid is exported too", (
 });
 
 test("a document containing a literal </script> still exports", () => {
-  // The PDF path embeds the markdown raw into a script block and therefore has
-  // to REJECT any document containing a closing script tag. Inheriting that
-  // here would mean a document losing its diagrams because its prose happens
-  // to discuss HTML, which is why the markdown is base64-encoded into the page
-  // instead. Without the encoding the block closes early, the page script
-  // never runs, and the export hangs until it times out.
+  // Both commands embed the markdown in a script block, so both have to deal
+  // with a document whose prose discusses HTML -- which is most documents that
+  // discuss HTML. Here the markdown is base64-encoded; the PDF path escapes
+  // the tags instead, to keep --keep-html readable. Either way, without it the
+  // block closes early, the page script never runs, and the export hangs until
+  // it times out.
   const dir = path.join(OUT, "mermaid-script-tag");
   const source = path.join(FIXTURES, "script-tag.md");
   const r = md2pdf("mermaid", source, "-o", dir);
@@ -846,10 +1038,19 @@ test("a document containing a literal </script> still exports", () => {
   const labels = inspectSvg(path.join(dir, "script-tag-01.svg")).labels;
   assert(/Parse/.test(labels) && /Render/.test(labels), `wrong diagram exported: ${labels}`);
 
-  // And the PDF path still refuses the same file -- the two commands differ
-  // here on purpose, so if that ever changes this test should be revisited.
-  const pdf = md2pdf(source, "-o", path.join(OUT, "script-tag.pdf"));
-  assert(pdf.code !== 0, "the PDF path is expected to still reject a literal </script>");
+  // The PDF path renders the same file rather than refusing it, and the tags
+  // survive as text. Asserting on the rendered DOM, not the built file: the
+  // built file holds them escaped, which would prove nothing about what the
+  // reader ends up looking at.
+  const html = path.join(OUT, "script-tag.html");
+  const pdf = md2pdf(source, "-o", path.join(OUT, "script-tag.pdf"), "--keep-html", html);
+  assert(pdf.code === 0, `expected the PDF path to render it, got exit ${pdf.code}.\n        ${pdf.output.trim()}`);
+  const dom = renderedDom(html);
+  assert(
+    dom.includes('&lt;script src="app.js"&gt;&lt;/script&gt;'),
+    "the literal script tags did not survive into the rendered document"
+  );
+  assert(/1\/1 diagrams/.test(pdf.output), `the diagram was lost: ${pdf.output.trim()}`);
 });
 
 test("--theme, --font and --html-labels each reach the diagram", () => {

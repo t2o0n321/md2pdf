@@ -407,8 +407,10 @@ test("Obsidian embeds, callouts, wikilinks and highlights are rendered", () => {
   assert(/<img[^>]+src="file:\/\/[^"]*sample\.png"/.test(built), "embed was not resolved to a file: URL");
   // ![[sample.png|120]] -- Obsidian's width suffix.
   assert(/<img[^>]+width="120"/.test(built), "the |120 size suffix was not applied");
-  // Both images must actually decode, not merely be referenced.
-  assert(/2\/2 images/.test(r.output), `expected 2/2 images, got: ${r.output.trim()}`);
+  // ![[sample.png\|80]] -- escaped pipe inside a table cell.
+  assert(/<img[^>]+width="80"/.test(built), "the \\|80 escaped-pipe size suffix was not applied");
+  // All images must actually decode, not merely be referenced.
+  assert(/4\/4 images/.test(r.output), `expected 4/4 images, got: ${r.output.trim()}`);
 
   // Everything below is built by the page at runtime, so it has to be read
   // back from the rendered DOM.

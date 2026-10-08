@@ -10,6 +10,12 @@ The same file with Obsidian's width suffix:
 
 ![[sample.png|120]]
 
+Inside a table, the pipe in the size suffix must be escaped as `\|`:
+
+| left | right |
+| ---- | ----- |
+| ![[sample.png\|80]] | ![[sample.png\|80]] |
+
 ## Callouts
 
 > [!NOTE]
